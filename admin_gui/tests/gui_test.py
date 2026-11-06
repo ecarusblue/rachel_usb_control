@@ -1,4 +1,5 @@
-import sys, time, threading
+import sys, time, threading, tempfile, os, re
+LOGDIR = tempfile.mkdtemp(); os.environ['USBGUARD_LOG_DIR'] = LOGDIR
 from datetime import timedelta
 import os; R=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."); sys.path.insert(0, os.path.join(R,"server")); sys.path.insert(0, os.path.join(R,"admin_gui"))
 import app as A, uvicorn
@@ -72,5 +73,19 @@ called = []
 w.relogin = lambda: called.append(1)
 d.api.call("POST", "/api/logout"); w.refresh(); pump(1.5)
 check("401 -> 재로그인 호출", called)
+# 로그 파일 검증
+from datetime import datetime
+fn = os.path.join(LOGDIR, f"log_{datetime.now():%Y%m%d}.log")
+check("log_yyyymmdd.log 생성", os.path.exists(fn) and re.fullmatch(r"log_\d{8}\.log", os.path.basename(fn)))
+txt = open(fn, encoding="utf-8").read()
+check("앱 시작/제어 상태 확인 시작 기록", "관리자 앱 시작" in txt and "제어 상태 확인 시작" in txt and "[공부방-PC1]" in txt)
+check("PC2 USB 연결 경고 기록", "[WARNING] [공부방-PC2]" in txt and "SanDisk Ultra USB Device" in txt)
+check("상담실-PC 오프라인 기록", "상담실-PC" in txt and "오프라인(확인 불가)" in txt)
+check("관리자 동작(정책 변경/임시허용/PC 등록/삭제) 기록",
+      "[관리자] 정책 변경 요청: 공부방-PC1 → 허용" in txt and "[관리자] 임시 허용 요청: 공부방-PC1 30분" in txt
+      and "[관리자] PC 등록: 신규-PC" in txt and "[관리자] PC 삭제: 신규-PC" in txt)
+check("세션 만료 기록", "세션 만료(401)" in txt)
+w.close(); check("종료 기록", "관리자 앱 종료" in open(fn, encoding="utf-8").read())
+print(open(fn, encoding="utf-8").read())
 w.timer.stop(); srv.should_exit = True
 print("ALL OK")
