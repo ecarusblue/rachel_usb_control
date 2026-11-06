@@ -13,7 +13,8 @@
 | `Service/` | SYSTEM 권한 Windows 서비스 (정책 적용, 상태 수집·보고, 로컬 CLI 처리) |
 | `Admin/` | PC 로컬 CLI `usbguard.exe` (서버 등록, 비상용 로컬 제어) |
 | `Common/` | 프로토콜 정의 |
-| `server/` | 중앙 서버 (FastAPI) + 웹 GUI (`server/static/index.html`) |
+| `server/` | 중앙 서버 (FastAPI) + 웹 현황판 (`server/static/index.html`) |
+| `admin_gui/` | **관리자 데스크톱 GUI** (PySide6) — 서버 API에 접속하는 Windows 창 프로그램 |
 
 ## 1. 서버 설치 (관리자 PC / 서버 PC, Python 3.11+)
 ```
@@ -39,7 +40,28 @@ C:\UsbGuard\admin\usbguard.exe enroll http://<서버IP>:8080 <토큰>   # 서버
 ```
 등록 후 서버가 정책을 관리하며, 로컬 CLI의 모드 변경은 거부됩니다. 서버를 못 쓰는 비상시 `usbguard unenroll`(로컬 비밀번호 필요).
 
-## 3. 관리자 현황판 (대시보드)
+## 3. 관리자 데스크톱 GUI (브라우저 없이)
+![desktop](docs/desktop_gui.png)
+
+관리자 PC 에서 실행하는 창 프로그램입니다. 서버 주소와 관리자 비밀번호로 로그인하면 아래 현황판이 표시됩니다.
+```
+cd admin_gui
+pip install -r requirements.txt
+python usbguard_gui.py
+```
+단일 exe 로 배포하려면:
+```
+pip install pyinstaller
+pyinstaller --noconsole --onefile --name UsbGuardAdmin usbguard_gui.py
+```
+- 서버 주소는 마지막 입력값을 기억하고, 세션이 만료되면 재로그인 창이 뜸
+- 네트워크 호출은 별도 스레드에서 수행해 화면이 멈추지 않음 (10초 자동 갱신)
+- 테스트: `pip install PySide6-Essentials && QT_QPA_PLATFORM=offscreen python admin_gui/tests/gui_test.py`
+
+## 4. 웹 현황판 (선택, 같은 기능)
+서버에 내장된 웹 화면(`http://<서버IP>:8080`)으로도 동일한 현황을 볼 수 있습니다.
+
+### 현황판 구성
 ![dashboard](docs/dashboard.png)
 *(데모 데이터 화면)*
 
