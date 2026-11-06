@@ -1,5 +1,4 @@
-import sys, time, threading, tempfile, os, re
-LOGDIR = tempfile.mkdtemp(); os.environ['USBGUARD_LOG_DIR'] = LOGDIR
+import sys, time, threading
 from datetime import timedelta
 import os; R=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."); sys.path.insert(0, os.path.join(R,"server")); sys.path.insert(0, os.path.join(R,"admin_gui"))
 import app as A, uvicorn
@@ -68,24 +67,24 @@ nid = next(a["id"] for a in d.api.call("GET","/api/agents") if a["name"]=="신�
 w.delete_agent(nid, "신규-PC"); pump(1.5)
 check("PC 삭제", not any(a["name"]=="신규-PC" for a in d.api.call("GET","/api/agents")))
 
+# 서버 로그 조회 화면 (관리자 앱이 아니라 서버가 기록한 로그를 표시)
+A.log_observe()
+ld = G.LogDialog(w); pump(2.0)
+check("로그 화면: 날짜 목록(log_yyyymmdd.log)에 오늘 파일", ld.files.count() >= 1)
+txt = ld.view.toPlainText()
+check("로그 화면: 서버 기록 표시(PC 등록/제어 상태 확인 시작)", "[관리자] PC 등록: 공부방-PC1" in txt and "제어 상태 확인 시작" in txt)
+check("로그 화면: 정책 변경(한국어) 표시", "[관리자] 정책 변경: 공부방-PC1 | 차단 → 허용" in txt)
+ld.filter.setText("PC2"); pump(0.3)
+t2 = ld.view.toPlainText()
+check("로그 화면: 검색 필터", "공부방-PC2" in t2 and "공부방-PC1" not in t2)
+ld.filter.setText(""); ld.tail.setCurrentIndex(0); pump(1.0)
+check("로그 화면: 줄 수/필터 해제 후 재표시", "공부방-PC1" in ld.view.toPlainText())
+ld.grab().save("/tmp/gui_log.png"); ld.timer.stop(); ld.close()
+
 # 세션 만료(401) 처리 -> 재로그인 흐름
 called = []
 w.relogin = lambda: called.append(1)
 d.api.call("POST", "/api/logout"); w.refresh(); pump(1.5)
 check("401 -> 재로그인 호출", called)
-# 로그 파일 검증
-from datetime import datetime
-fn = os.path.join(LOGDIR, f"log_{datetime.now():%Y%m%d}.log")
-check("log_yyyymmdd.log 생성", os.path.exists(fn) and re.fullmatch(r"log_\d{8}\.log", os.path.basename(fn)))
-txt = open(fn, encoding="utf-8").read()
-check("앱 시작/제어 상태 확인 시작 기록", "관리자 앱 시작" in txt and "제어 상태 확인 시작" in txt and "[공부방-PC1]" in txt)
-check("PC2 USB 연결 경고 기록", "[WARNING] [공부방-PC2]" in txt and "SanDisk Ultra USB Device" in txt)
-check("상담실-PC 오프라인 기록", "상담실-PC" in txt and "오프라인(확인 불가)" in txt)
-check("관리자 동작(정책 변경/임시허용/PC 등록/삭제) 기록",
-      "[관리자] 정책 변경 요청: 공부방-PC1 → 허용" in txt and "[관리자] 임시 허용 요청: 공부방-PC1 30분" in txt
-      and "[관리자] PC 등록: 신규-PC" in txt and "[관리자] PC 삭제: 신규-PC" in txt)
-check("세션 만료 기록", "세션 만료(401)" in txt)
-w.close(); check("종료 기록", "관리자 앱 종료" in open(fn, encoding="utf-8").read())
-print(open(fn, encoding="utf-8").read())
 w.timer.stop(); srv.should_exit = True
 print("ALL OK")

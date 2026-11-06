@@ -1,12 +1,12 @@
-"""관리자 앱 제어 상태 로그 저장
+"""서버 제어 상태 로그 저장
 
 - 파일명: log_yyyymmdd.log (로컬 날짜 기준, 하루 1개, UTF-8, 자정이 지나면 자동으로 새 파일)
 - 보관: 오늘 포함 14일치만 유지하고, 그보다 오래된 log_yyyymmdd.log 는 자동 삭제
         (이름이 log_yyyymmdd.log 형식이 아닌 파일은 절대 건드리지 않음)
-- 위치: %LOCALAPPDATA%\\UsbGuardAdmin\\logs  (환경변수 USBGUARD_LOG_DIR 로 변경 가능)
+- 위치: 서버 데이터 폴더의 logs/  (환경변수 USBGUARD_LOG_DIR 로 변경 가능)
 
 기록 내용 (ControlLogger)
-  * 프로그램 시작/종료, 관리자 동작(정책 변경, PC 등록·삭제), 서버 연결 끊김/복구
+  * 서버 시작/종료, 관리자 동작(로그인, 정책 변경, 30분 허용, PC 등록·삭제), 등록되지 않은 토큰의 보고 시도
   * PC별 제어 상태 "변화" 즉시 기록: 상태 변경, 정책 변경, USB 저장장치 연결/해제, 설정 변조 감지
   * PC별 제어 상태 "스냅샷" 주기 기록(기본 10분): 변화가 없어도 제어가 유지되고 있음을 남김
 """
@@ -22,7 +22,7 @@ from typing import Callable, Optional
 RETENTION_DAYS = 14        # 오늘 포함 14일치 보관
 SNAPSHOT_SEC = 600         # 변화가 없어도 이 주기로 현재 제어 상태를 기록
 OFFLINE_SEC = 100          # server/app.py 의 OFFLINE_SEC 와 동일 기준
-FILE_RE = re.compile(r"^log_(\d{8})\.log$")
+FILE_RE = re.compile(r"log_(\d{8})\.log")      # fullmatch 로만 사용
 
 STATE_LABEL = {"ok": "제어 정상", "pending": "반영 대기", "warn": "확인 필요", "danger": "위험", "unknown": "미확인"}
 MODE_LABEL = {"block": "차단", "read_only": "읽기 전용", "allow": "허용"}
@@ -77,7 +77,7 @@ class DailyLog:
         except OSError:
             return removed
         for p in entries:
-            m = FILE_RE.match(p.name)
+            m = FILE_RE.fullmatch(p.name)
             if not m or p.is_symlink() or not p.is_file():
                 continue
             try:
@@ -110,6 +110,15 @@ def _fmt_age(sec: Optional[int]) -> str:
     return f"{sec // 3600}시간 전"
 
 
+def _local_clock(iso: str) -> str:
+    """서버가 주는 UTC ISO 시각 -> 서버 PC 현지 시각 HH:MM:SS"""
+    try:
+        d = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", iso).replace("Z", "+00:00"))
+        return d.astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        return iso
+
+
 def _v(x) -> str:
     return "-" if x is None else str(x)
 
@@ -138,7 +147,7 @@ def describe(a: dict) -> str:
         f"마지막보고={_fmt_age(a.get('age_sec'))}",
     ]
     if a.get("temp_until"):
-        parts.insert(2, f"임시허용~{a['temp_until']}")
+        parts.insert(2, f"임시허용~{_local_clock(a['temp_until'])}")
     line = " | ".join(parts)
     if a["state"] in ("warn", "danger") and a.get("reasons"):
         line += " | 사유: " + "; ".join(a["reasons"])
@@ -150,7 +159,7 @@ def _dev_names(a: dict) -> frozenset:
 
 
 class ControlLogger:
-    """관리자 앱이 받아오는 PC 현황을 지켜보며 제어 상태 로그를 남긴다."""
+    """PC 현황을 지켜보며 제어 상태 로그를 남긴다. (서버 감시 루프에서 주기적으로 observe 호출)"""
 
     def __init__(self, log: Optional[DailyLog] = None, snapshot_sec: int = SNAPSHOT_SEC,
                  now: Callable[[], datetime] = datetime.now):
@@ -161,6 +170,7 @@ class ControlLogger:
         self._initialized = False
         self._last_snapshot: Optional[datetime] = None
         self._conn_ok: Optional[bool] = None
+        self._lock = threading.RLock()
 
     # ── 일반 기록 ──
     def info(self, msg: str, agent: Optional[str] = None):
@@ -182,6 +192,10 @@ class ControlLogger:
 
     # ── PC 상태 관찰 ──
     def observe(self, agents: list[dict]) -> None:
+        with self._lock:
+            self._observe(agents)
+
+    def _observe(self, agents: list[dict]) -> None:
         self.log.maybe_cleanup()
         now = self._now()
         snap = self._last_snapshot is None or (now - self._last_snapshot).total_seconds() >= self.snapshot_sec

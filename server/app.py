@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import sqlite3
+from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,9 +24,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
+from logstore import FILE_RE, MODE_LABEL, RETENTION_DAYS, ControlLogger, DailyLog
+
 BASE_DIR = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("USBGUARD_DATA", BASE_DIR / "data"))
 DB_PATH = DATA_DIR / "usbguard.db"
+LOG_DIR = Path(os.environ.get("USBGUARD_LOG_DIR") or DATA_DIR / "logs")
 
 OFFLINE_SEC = 100          # 하트비트(30초) 3번 연속 누락 -> 오프라인
 PENDING_SEC = 75           # 정책 변경 직후 반영 대기 허용 시간
@@ -143,10 +147,37 @@ def set_setting(key: str, value: str) -> None:
                   (key, value))
 
 
+daily_log = DailyLog(LOG_DIR)            # log_yyyymmdd.log, 오늘 포함 14일 보관
+control_log = ControlLogger(daily_log)   # PC별 제어 상태 변화/주기 점검 기록
+
+
+def _ko_modes(text: str) -> str:
+    return re.sub(r"\b(block|read_only|allow)\b", lambda m: MODE_LABEL[m.group(1)], text or "")
+
+
+def _file_event(kind: str, detail: str, agent_name: Optional[str]) -> None:
+    """관리자 동작은 DB 이벤트와 함께 로그 파일에도 남긴다. (상태 변화는 ControlLogger 가 기록)"""
+    n = agent_name or ""
+    d = _ko_modes(detail)
+    if kind == "admin_login":
+        daily_log.write("INFO", f"[관리자] 로그인 | {d}")
+    elif kind == "admin_login_fail":
+        daily_log.write("WARNING", f"[관리자] 로그인 실패 | {d}")
+    elif kind == "agent_created":
+        daily_log.write("INFO", f"[관리자] PC 등록: {n}")
+    elif kind == "agent_deleted":
+        daily_log.write("INFO", f"[관리자] PC 삭제: {n}")
+    elif kind == "mode_changed":
+        daily_log.write("INFO", f"[관리자] 정책 변경: {n} | {d}")
+    elif kind == "temp_allow":
+        daily_log.write("INFO", f"[관리자] 임시 허용: {n} | {d}")
+
+
 def log_event(c: sqlite3.Connection, kind: str, detail: str = "",
               agent_id: Optional[int] = None, agent_name: Optional[str] = None) -> None:
     c.execute("INSERT INTO events(ts, agent_id, agent_name, kind, detail) VALUES(?,?,?,?,?)",
               (iso(now_utc()), agent_id, agent_name, kind, detail))
+    _file_event(kind, detail, agent_name)
 
 
 # ───────────────────────── 상태 판정 ─────────────────────────
@@ -223,18 +254,30 @@ def refresh_states(only_id: Optional[int] = None) -> None:
 init_db()
 
 
+def log_observe() -> None:
+    """현재 PC 상태를 판정해 제어 상태 로그에 기록 (변화 즉시 + 10분 주기 점검 + 14일 초과 파일 정리)."""
+    with tx() as c:
+        views = agent_views(c, now_utc())
+    control_log.observe(views)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    daily_log.write("INFO", f"서버 시작 | 로그 위치={LOG_DIR} | 보관 {RETENTION_DAYS}일")
+    daily_log.maybe_cleanup()
+
     async def watcher():
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
             try:
                 await asyncio.to_thread(refresh_states)
-            except Exception:
-                pass
+                await asyncio.to_thread(log_observe)
+            except Exception as e:      # 감시가 죽지 않도록
+                daily_log.write("ERROR", f"감시 루프 오류: {e!r}")
     task = asyncio.create_task(watcher())
     yield
     task.cancel()
+    daily_log.write("INFO", "서버 종료")
 
 
 app = FastAPI(title="UsbGuard Server", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -304,41 +347,45 @@ class ModeBody(BaseModel):
     temp_minutes: Optional[int] = Field(default=None, ge=1, le=480)
 
 
+def agent_views(c: sqlite3.Connection, now: datetime) -> list[dict]:
+    """PC별 현재 상태 뷰 (GUI 표시와 제어 상태 로그가 같은 판정을 사용)."""
+    out = []
+    for a in c.execute("SELECT * FROM agents ORDER BY name").fetchall():
+        r = json.loads(a["report"] or "{}")
+        state, reasons = evaluate(a, now)
+        last_seen = parse(a["last_seen"])
+        tu = parse(a["temp_until"])
+        out.append({
+            "id": a["id"],
+            "name": a["name"],
+            "hostname": r.get("hostname"),
+            "version": r.get("version"),
+            "state": state,
+            "reasons": reasons,
+            "desired_mode": a["desired_mode"],
+            "expected_mode": expected_mode(a, now),
+            "effective_mode": r.get("effective_mode"),
+            "temp_until": iso(tu) if tu and tu > now else None,
+            "usb_devices": r.get("usb_devices", []),
+            "tamper_count": r.get("tamper_count", 0),
+            "configured_mode": r.get("configured_mode"),
+            "usbstor_start": r.get("usbstor_start"),
+            "write_protect": r.get("write_protect"),
+            "last_enforce_utc": r.get("last_enforce_utc"),
+            "last_tamper_utc": r.get("last_tamper_utc"),
+            "created_at": a["created_at"],
+            "last_seen": a["last_seen"],
+            "age_sec": int((now - last_seen).total_seconds()) if last_seen else None,
+            "last_ip": a["last_ip"],
+        })
+    return out
+
+
 @app.get("/api/agents", dependencies=[Depends(require_admin)])
 def list_agents():
     refresh_states()
-    now = now_utc()
-    out = []
     with tx() as c:
-        for a in c.execute("SELECT * FROM agents ORDER BY name").fetchall():
-            r = json.loads(a["report"] or "{}")
-            state, reasons = evaluate(a, now)
-            last_seen = parse(a["last_seen"])
-            tu = parse(a["temp_until"])
-            out.append({
-                "id": a["id"],
-                "name": a["name"],
-                "hostname": r.get("hostname"),
-                "version": r.get("version"),
-                "state": state,
-                "reasons": reasons,
-                "desired_mode": a["desired_mode"],
-                "expected_mode": expected_mode(a, now),
-                "effective_mode": r.get("effective_mode"),
-                "temp_until": iso(tu) if tu and tu > now else None,
-                "usb_devices": r.get("usb_devices", []),
-                "tamper_count": r.get("tamper_count", 0),
-                "configured_mode": r.get("configured_mode"),
-                "usbstor_start": r.get("usbstor_start"),
-                "write_protect": r.get("write_protect"),
-                "last_enforce_utc": r.get("last_enforce_utc"),
-                "last_tamper_utc": r.get("last_tamper_utc"),
-                "created_at": a["created_at"],
-                "last_seen": a["last_seen"],
-                "age_sec": int((now - last_seen).total_seconds()) if last_seen else None,
-                "last_ip": a["last_ip"],
-            })
-    return out
+        return agent_views(c, now_utc())
 
 
 @app.post("/api/agents", dependencies=[Depends(require_admin)])
@@ -398,6 +445,29 @@ def events(limit: int = 60):
     return [dict(r) for r in rows]
 
 
+@app.get("/api/logs", dependencies=[Depends(require_admin)])
+def list_logs():
+    files = []
+    if LOG_DIR.exists():
+        for p in sorted(LOG_DIR.iterdir(), reverse=True):
+            if FILE_RE.fullmatch(p.name) and p.is_file() and not p.is_symlink():
+                files.append({"name": p.name, "size": p.stat().st_size})
+    return {"dir": str(LOG_DIR), "retention_days": RETENTION_DAYS, "files": files}
+
+
+@app.get("/api/logs/{name}", dependencies=[Depends(require_admin)])
+def read_log(name: str, tail: int = 500):
+    if not FILE_RE.fullmatch(name):          # log_yyyymmdd.log 형식만 허용 (경로 조작 차단)
+        raise HTTPException(400, "잘못된 로그 파일명")
+    p = LOG_DIR / name
+    if not p.is_file() or p.is_symlink():
+        raise HTTPException(404, "로그 파일이 없습니다")
+    tail = max(1, min(tail, 5000))
+    with open(p, encoding="utf-8", errors="replace") as f:
+        lines = deque((ln.rstrip("\r\n") for ln in f), maxlen=tail)
+    return {"name": name, "lines": list(lines)}
+
+
 # ───────────────────────── 에이전트 API ─────────────────────────
 class UsbDeviceIn(BaseModel):
     model: str = ""
@@ -419,16 +489,30 @@ class HeartbeatIn(BaseModel):
     temp_until_utc: Optional[str] = None
 
 
+_reject_seen: dict[str, datetime] = {}
+
+
+def _log_reject(ip: Optional[str], why: str) -> None:
+    key = f"{ip}|{why}"
+    last = _reject_seen.get(key)
+    if last and (now_utc() - last).total_seconds() < 600:
+        return
+    _reject_seen[key] = now_utc()
+    daily_log.write("WARNING", f"에이전트 보고 거부: {why} | ip={ip}")
+
+
 @app.post("/api/agent/heartbeat")
 def heartbeat(body: HeartbeatIn, request: Request, authorization: Optional[str] = Header(default=None)):
+    ip = request.client.host if request.client else None
     if not authorization or not authorization.lower().startswith("bearer "):
+        _log_reject(ip, "토큰 없음")
         raise HTTPException(401, "토큰 필요")
     th = token_hash(authorization[7:].strip())
-    ip = request.client.host if request.client else None
     now = now_utc()
     with tx() as c:
         a = c.execute("SELECT * FROM agents WHERE token_hash=?", (th,)).fetchone()
         if not a:
+            _log_reject(ip, "등록되지 않은 토큰")
             raise HTTPException(401, "등록되지 않은 토큰")
         c.execute("UPDATE agents SET last_seen=?, last_ip=?, report=? WHERE id=?",
                   (iso(now), ip, json.dumps(body.model_dump(), ensure_ascii=False), a["id"]))

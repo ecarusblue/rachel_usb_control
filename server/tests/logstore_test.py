@@ -1,5 +1,5 @@
-"""logstore 단위 테스트 (Qt 불필요):  python admin_gui/tests/logstore_test.py"""
-import os, sys, tempfile
+"""logstore 단위 테스트:  python server/tests/logstore_test.py"""
+import os, re, sys, tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -90,6 +90,10 @@ r = read()
 check("서버 연결 실패/복구는 전환 시 1회씩만", r.count("서버 연결 실패") == 1 and r.count("서버 연결 복구") == 1)
 cl.action("정책 변경: PC1 → 차단")
 check("관리자 동작 기록", "[INFO] [관리자] 정책 변경: PC1 → 차단" in read())
+
+# 4-b) 임시허용 시각은 UTC 원문이 아니라 현지 시각(HH:MM:SS)으로
+d = L.describe(ag(temp_until="2026-11-06T05:47:34.5774730Z"))
+check("임시허용 시각 현지 표기", re.search(r"임시허용~\d\d:\d\d:\d\d \|", d) is not None and "T05:47" not in d)
 
 # 5) 쓰기 실패 시 예외 없이 last_error 기록
 bad = L.DailyLog(Path(tmp2/"log_20261106.log"/"sub"), now=clk2); bad.write("INFO", "x")

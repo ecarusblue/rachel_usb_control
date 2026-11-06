@@ -15,15 +15,14 @@ from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QGuiApplication
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
-
-from logstore import RETENTION_DAYS, ControlLogger
 
 REFRESH_MS = 10_000
 OFFLINE_SEC = 100
@@ -184,7 +183,6 @@ class PcCard(QFrame):
     def __init__(self, a: dict, win: "MainWindow"):
         super().__init__()
         st_label, st_fg, st_bg, bar = STATE.get(a["state"], STATE["unknown"])
-        self.agent_id, self.agent_name = a["id"], a["name"]
         self.setObjectName("pc")
         self.setStyleSheet(f"QFrame#pc{{background:#fff;border:1px solid #e2e6ee;"
                            f"border-left:6px solid {bar};border-radius:10px;}}")
@@ -372,7 +370,6 @@ class AddDialog(QDialog):
         if not name:
             return
         def ok(r):
-            self.win.logger.action(f"PC 등록: {r['name']}")
             self.info.setText(f"<b>{r['name']}</b> 등록 완료. 토큰은 <b>지금 한 번만</b> 표시됩니다.<br>"
                               "대상 PC에서 <b>관리자 권한 명령 프롬프트</b>로 아래 명령을 실행하세요.")
             self.cmd.setText(f"usbguard enroll {self.win.api.base} {r['token']}")
@@ -384,17 +381,126 @@ class AddDialog(QDialog):
                      lambda e: self.info.setText(f"<span style='color:#c0291b'>{e}</span>"))
 
 
+class LogDialog(QDialog):
+    """서버가 저장한 제어 상태 로그(log_yyyymmdd.log) 조회. 관리자 앱이 꺼져 있던 시간대의 기록도 볼 수 있다."""
+
+    LEVEL_COLOR = {"[ERROR]": "#c0291b", "[WARNING]": "#a56200"}
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+        self.lines: list[str] = []
+        self.setWindowTitle("서버 제어 로그")
+        self.resize(1100, 680)
+        lay = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        bar.addWidget(label("날짜"))
+        self.files = QComboBox()
+        self.files.setMinimumWidth(170)
+        self.files.currentIndexChanged.connect(self.load_text)
+        bar.addWidget(self.files)
+        bar.addWidget(label("표시 줄 수"))
+        self.tail = QComboBox()
+        for n in (200, 500, 1000, 2000, 5000):
+            self.tail.addItem(f"{n}줄", n)
+        self.tail.setCurrentIndex(1)
+        self.tail.currentIndexChanged.connect(self.load_text)
+        bar.addWidget(self.tail)
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText("검색 (PC 이름, ERROR, WARNING, 관리자 …)")
+        self.filter.textChanged.connect(self.render)
+        bar.addWidget(self.filter, 1)
+        self.auto = QCheckBox("10초 자동 갱신")
+        self.auto.setChecked(True)
+        bar.addWidget(self.auto)
+        reload_btn = QPushButton("새로고침")
+        reload_btn.clicked.connect(self.reload)
+        bar.addWidget(reload_btn)
+        lay.addLayout(bar)
+
+        self.info = label("", "color:#6a7488;font-size:12px", True)
+        lay.addWidget(self.info)
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setLineWrapMode(QTextEdit.WidgetWidth)     # 긴 줄도 잘리지 않게 줄바꿈
+        f = QFont("Consolas")
+        f.setStyleHint(QFont.Monospace)
+        f.setPointSize(10)
+        self.view.setFont(f)
+        self.view.setStyleSheet("background:#fff;border:1px solid #e2e6ee;border-radius:6px")
+        lay.addWidget(self.view, 1)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(lambda: self.auto.isChecked() and self.load_text())
+        self.timer.start(REFRESH_MS)
+        self.reload()
+
+    def reload(self):
+        """파일 목록을 다시 받고 현재 선택(없으면 최신)을 표시."""
+        keep = self.files.currentData()
+
+        def ok(r):
+            self.files.blockSignals(True)
+            self.files.clear()
+            for f in r["files"]:
+                d = f["name"][4:12]
+                self.files.addItem(f"{d[:4]}-{d[4:6]}-{d[6:]}  ({f['size'] // 1024 + 1} KB)", f["name"])
+            if keep:
+                i = self.files.findData(keep)
+                if i >= 0:
+                    self.files.setCurrentIndex(i)
+            self.files.blockSignals(False)
+            self.info.setText(f"서버 저장 위치: {r['dir']}  ·  오늘 포함 {r['retention_days']}일치 보관, 이후 자동 삭제  ·  "
+                              f"파일 {len(r['files'])}개")
+            self.load_text()
+        self.win.run(lambda: self.win.api.call("GET", "/api/logs"), ok,
+                     lambda e: self.info.setText(f"로그 목록을 가져오지 못했습니다: {e}"))
+
+    def load_text(self):
+        name = self.files.currentData()
+        if not name:
+            self.lines = []
+            self.render()
+            return
+        n = self.tail.currentData() or 500
+
+        def ok(r):
+            if self.files.currentData() != r["name"]:
+                return                      # 그 사이 다른 날짜를 선택함
+            self.lines = r["lines"]
+            self.render()
+        self.win.run(lambda: self.win.api.call("GET", f"/api/logs/{name}?tail={n}"), ok,
+                     lambda e: self.info.setText(f"로그를 가져오지 못했습니다: {e}"))
+
+    def render(self):
+        q = self.filter.text().strip().lower()
+        shown = [ln for ln in self.lines if not q or q in ln.lower()]
+        bar = self.view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        old = bar.value()
+        html = []
+        for ln in shown:
+            color = next((c for k, c in self.LEVEL_COLOR.items() if k in ln[:40]), "#1b2333")
+            esc_ln = ln.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            html.append(f'<div style="color:{color};white-space:pre-wrap;margin-bottom:3px">{esc_ln}</div>')
+        self.view.setHtml("".join(html) if html else '<div style="color:#6a7488">표시할 로그가 없습니다.</div>')
+        if at_bottom or self.view.toPlainText() == "":
+            bar.setValue(bar.maximum())                  # 최신 줄이 보이게 (가로 위치는 건드리지 않음)
+        else:
+            bar.setValue(old)
+        self.view.horizontalScrollBar().setValue(0)
+
+
 class Bus(QObject):
     call = Signal(object)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, api: Api, logger: Optional[ControlLogger] = None):
+    def __init__(self, api: Api):
         super().__init__()
         self.api = api
-        self.logger = logger or ControlLogger()
         self._busy = False
-        self.logger.info(f"관리자 앱 시작 | 서버={api.base} | 로그 위치={self.logger.log.dir} | 보관 {RETENTION_DAYS}일")
         self.setWindowTitle("UsbGuard USB 제어 현황판")
         self.resize(1320, 900)
         self.bus = Bus()
@@ -412,9 +518,9 @@ class MainWindow(QMainWindow):
         top.addStretch(1)
         self.status = label("연결 중…", "color:#6a7488;font-size:12px")
         top.addWidget(self.status)
-        logb = QPushButton("로그 폴더")
-        logb.setToolTip(f"제어 상태 로그 (log_yyyymmdd.log, {RETENTION_DAYS}일 보관)\n{self.logger.log.dir}")
-        logb.clicked.connect(self.open_log_dir)
+        logb = QPushButton("서버 로그")
+        logb.setToolTip("서버가 저장한 제어 상태 로그 (log_yyyymmdd.log, 14일 보관)")
+        logb.clicked.connect(lambda: LogDialog(self).exec())
         top.addWidget(logb)
         add = QPushButton("+ PC 등록")
         add.clicked.connect(lambda: AddDialog(self).exec())
@@ -492,7 +598,6 @@ class MainWindow(QMainWindow):
 
     def _on_err(self, e: ApiError, err: Optional[Callable]):
         if e.code == 401:
-            self.logger.info("세션 만료(401) — 재로그인 필요")
             self.relogin()
         elif err:
             err(e)
@@ -509,14 +614,11 @@ class MainWindow(QMainWindow):
 
         def ok(r):
             self._busy = False
-            self.logger.connection(True)
             self.apply(*r)
-            warn = " · ⚠ 로그 저장 실패" if self.logger.log.last_error else ""
-            self.status.setText("● 10초 자동 갱신 · " + datetime.now().strftime("%H:%M:%S") + warn)
+            self.status.setText("● 10초 자동 갱신 · " + datetime.now().strftime("%H:%M:%S"))
 
         def err(e):
             self._busy = False
-            self.logger.connection(False, str(e))
             self.status.setText(f"갱신 실패: {e}")
 
         def on_err(e):          # run() 의 401 분기에서도 busy 해제
@@ -526,7 +628,6 @@ class MainWindow(QMainWindow):
 
     # ── 렌더링 ──
     def apply(self, agents: list, events: list):
-        self.logger.observe(agents)      # 제어 상태 로그 (변화 즉시 + 주기 점검)
         self.render_summary(agents)
         self.render_cards(agents)
         self.render_events(events)
@@ -614,37 +715,18 @@ class MainWindow(QMainWindow):
         self.run(lambda: self.api.call("POST", f"/api/agents/{agent_id}/policy", body), lambda _: self.refresh())
 
     def set_mode(self, agent_id: int, mode: str):
-        self.logger.action(f"정책 변경 요청: {self._name(agent_id)} → {MODE[mode]}")
         self._policy(agent_id, {"mode": mode})
 
     def temp_allow(self, agent_id: int, minutes: int):
-        self.logger.action(f"임시 허용 요청: {self._name(agent_id)} {minutes}분")
         self._policy(agent_id, {"temp_minutes": minutes})
-
-    def _name(self, agent_id: int) -> str:
-        for i in range(self.grid.count()):
-            w = self.grid.itemAt(i).widget()
-            if isinstance(w, PcCard) and w.agent_id == agent_id:
-                return w.agent_name
-        return f"PC#{agent_id}"
 
     def delete_agent(self, agent_id: int, name: str):
         if QMessageBox.question(self, "PC 삭제",
                                 f"'{name}' 을(를) 삭제할까요?\n(해당 PC는 서버 보고가 거부되고, 마지막 정책을 유지합니다)") != QMessageBox.Yes:
             return
-        self.logger.action(f"PC 삭제: {name}")
         self.run(lambda: self.api.call("DELETE", f"/api/agents/{agent_id}"), lambda _: self.refresh())
 
-    def open_log_dir(self):
-        self.logger.log.dir.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.logger.log.dir)))
-
-    def closeEvent(self, ev):
-        self.logger.info("관리자 앱 종료")
-        super().closeEvent(ev)
-
     def logout(self):
-        self.logger.action("로그아웃")
         try:
             self.api.call("POST", "/api/logout")
         except ApiError:
