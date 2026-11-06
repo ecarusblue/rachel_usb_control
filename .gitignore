@@ -3,3 +3,6 @@ obj/
 out/
 .vs/
 *.user
+server/data/
+__pycache__/
+*.pyc

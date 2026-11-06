@@ -11,6 +11,10 @@ public sealed class Config
     public string? Salt { get; set; }   // base64
     public string? Hash { get; set; }   // base64 (PBKDF2-SHA256)
     public int Iterations { get; set; } = 200_000;
+
+    // 중앙 서버 연동 (둘 다 있으면 "서버 관리" 모드)
+    public string? ServerUrl { get; set; }
+    public string? AgentToken { get; set; }
 }
 
 public static class ConfigStore

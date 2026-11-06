@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
     <Compile Include="..\Common\Protocol.cs" Link="Protocol.cs" />
   </ItemGroup>
 </Project>

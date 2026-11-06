@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UsbGuard 관리 콘솔</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --card:#fff; --text:#1d2433; --muted:#6b7385; --line:#e3e6ec;
+    --ok:#1a7f4b; --ok-bg:#e3f5ea; --warn:#9a6700; --warn-bg:#fff3d1;
+    --danger:#b42318; --danger-bg:#fde7e4; --pend:#3b5bdb; --pend-bg:#e7ecff; --unk:#6b7385; --unk-bg:#eceef2;
+    --accent:#2b4acb;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI","Malgun Gothic",sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 24px; display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size:16px; margin:0; }
+  main { max-width:1100px; margin:20px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 12px; }
+  button { font:inherit; border:1px solid var(--line); background:#fff; border-radius:6px; padding:5px 10px; cursor:pointer; color:var(--text); }
+  button:hover { background:#f0f2f6; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover { background:#2340b0; }
+  button.danger { color:var(--danger); }
+  input { font:inherit; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-weight:600; color:var(--muted); font-size:12px; padding:6px 8px; border-bottom:1px solid var(--line); }
+  td { padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-weight:600; font-size:12px; white-space:nowrap; }
+  .ok { color:var(--ok); background:var(--ok-bg); } .warn { color:var(--warn); background:var(--warn-bg); }
+  .danger-b { color:var(--danger); background:var(--danger-bg); } .pending { color:var(--pend); background:var(--pend-bg); }
+  .unknown { color:var(--unk); background:var(--unk-bg); }
+  .reasons { color:var(--muted); font-size:12px; margin-top:4px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .actions { display:flex; flex-wrap:wrap; gap:4px; }
+  .mode-on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .login { max-width:340px; margin:80px auto; }
+  .login input { width:100%; margin:8px 0 12px; }
+  .err { color:var(--danger); min-height:20px; font-size:13px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  code { background:#eef0f4; padding:2px 6px; border-radius:4px; word-break:break-all; }
+  .tokenbox { background:#f7f8fb; border:1px dashed #b9c0d0; border-radius:8px; padding:12px; margin-top:12px; }
+  .ev td { padding:6px 8px; font-size:13px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+
+<div id="loginView" class="hidden">
+  <div class="card login">
+    <h2>UsbGuard 관리 콘솔</h2>
+    <label>관리자 비밀번호</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    <div class="err" id="loginErr"></div>
+    <button class="primary" id="loginBtn" style="width:100%">로그인</button>
+  </div>
+</div>
+
+<div id="mainView" class="hidden">
+  <header>
+    <h1>🔒 UsbGuard 관리 콘솔</h1>
+    <div class="row"><span class="muted" id="refreshInfo"></span><button id="logoutBtn">로그아웃</button></div>
+  </header>
+  <main>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <h2 style="margin:0">대상 PC</h2>
+        <button id="addToggle">+ PC 등록</button>
+      </div>
+      <div id="addBox" class="hidden" style="margin-bottom:12px">
+        <div class="row">
+          <input id="newName" placeholder="PC 이름 (예: 영어공부방-PC1)" maxlength="64" style="min-width:260px">
+          <button class="primary" id="addBtn">등록하고 토큰 발급</button>
+        </div>
+        <div id="tokenBox" class="tokenbox hidden"></div>
+      </div>
+      <table>
+        <thead><tr><th>PC</th><th>상태</th><th>정책</th><th>USB 저장장치</th><th>마지막 보고</th><th>정책 변경</th></tr></thead>
+        <tbody id="agents"></tbody>
+      </table>
+      <div id="empty" class="muted hidden" style="padding:16px 8px">등록된 PC가 없습니다. "+ PC 등록"으로 시작하세요.</div>
+    </div>
+
+    <div class="card">
+      <h2>최근 이벤트</h2>
+      <table class="ev"><tbody id="events"></tbody></table>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const STATE = {
+  ok:      ['정상',      'ok'],
+  pending: ['반영 대기', 'pending'],
+  warn:    ['확인 필요', 'warn'],
+  danger:  ['위험',      'danger-b'],
+  unknown: ['미확인',    'unknown'],
+};
+const MODE = { block:'차단', read_only:'읽기 전용', allow:'허용' };
+let timer = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? {'Content-Type':'application/json'} : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    credentials: 'same-origin',
+  });
+  if (res.status === 401 && path !== '/api/login') { showLogin(); throw new Error('unauthorized'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+  return data;
+}
+function fmtAge(s) {
+  if (s == null) return '—';
+  if (s < 60) return s + '초 전';
+  if (s < 3600) return Math.floor(s / 60) + '분 전';
+  return Math.floor(s / 3600) + '시간 전';
+}
+function fmtTime(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('ko-KR', {hour12:false});
+}
+
+function showLogin() {
+  clearInterval(timer);
+  $('mainView').classList.add('hidden');
+  $('loginView').classList.remove('hidden');
+  $('pw').value = ''; $('pw').focus();
+}
+function showMain() {
+  $('loginView').classList.add('hidden');
+  $('mainView').classList.remove('hidden');
+  load();
+  clearInterval(timer);
+  timer = setInterval(load, 10000);
+}
+
+async function load() {
+  try {
+    const [agents, events] = await Promise.all([api('/api/agents'), api('/api/events?limit=40')]);
+    renderAgents(agents);
+    renderEvents(events);
+    $('refreshInfo').textContent = '자동 갱신 10초 · ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
+  } catch (e) { if (e.message !== 'unauthorized') $('refreshInfo').textContent = '갱신 실패: ' + e.message; }
+}
+
+function renderAgents(list) {
+  $('empty').classList.toggle('hidden', list.length > 0);
+  $('agents').innerHTML = list.map(a => {
+    const [label, cls] = STATE[a.state] || STATE.unknown;
+    const m = a.expected_mode;
+    const modeBtn = (mode, text) =>
+      `<button class="${a.desired_mode === mode && !a.temp_until ? 'mode-on' : ''}" data-act="mode" data-id="${a.id}" data-mode="${mode}">${text}</button>`;
+    const devs = a.usb_devices.length
+      ? a.usb_devices.map(d => `<div>${esc(d.model || d.pnp_id)}</div>`).join('')
+      : '<span class="muted">없음</span>';
+    return `<tr>
+      <td><strong>${esc(a.name)}</strong><div class="muted">${esc(a.hostname || '—')}${a.last_ip ? ' · ' + esc(a.last_ip) : ''}${a.version ? ' · v' + esc(a.version) : ''}</div></td>
+      <td><span class="badge ${cls}">${label}</span>
+          <div class="reasons">${a.reasons.map(esc).join('<br>')}</div>
+          ${a.tamper_count ? `<div class="reasons">변조 감지 누적 ${a.tamper_count}회</div>` : ''}</td>
+      <td>적용: <strong>${esc(MODE[m] || m)}</strong>
+          ${a.temp_until ? `<div class="muted">임시 허용 ~ ${fmtTime(a.temp_until)}</div>` : ''}
+          <div class="muted">PC 보고: ${esc(MODE[a.effective_mode] || a.effective_mode || '—')}</div></td>
+      <td>${devs}</td>
+      <td>${fmtAge(a.age_sec)}</td>
+      <td><div class="actions">
+          ${modeBtn('block', '차단')}${modeBtn('read_only', '읽기 전용')}${modeBtn('allow', '허용')}
+          <button data-act="temp" data-id="${a.id}">30분 허용</button>
+          <button class="danger" data-act="del" data-id="${a.id}" data-name="${esc(a.name)}">삭제</button>
+      </div></td></tr>`;
+  }).join('');
+}
+
+function renderEvents(list) {
+  const KIND = {state:'상태', mode_changed:'정책 변경', temp_allow:'임시 허용', agent_created:'PC 등록',
+                agent_deleted:'PC 삭제', admin_login:'로그인', admin_login_fail:'로그인 실패'};
+  $('events').innerHTML = list.map(e =>
+    `<tr><td class="muted" style="white-space:nowrap">${fmtTime(e.ts)}</td>
+     <td style="white-space:nowrap">${esc(KIND[e.kind] || e.kind)}</td>
+     <td>${esc(e.agent_name || '')}</td><td class="muted">${esc(e.detail || '')}</td></tr>`).join('');
+}
+
+// ───── 이벤트 바인딩 ─────
+$('loginBtn').onclick = async () => {
+  $('loginErr').textContent = '';
+  try { await api('/api/login', {method:'POST', body:{password: $('pw').value}}); showMain(); }
+  catch (e) { $('loginErr').textContent = e.message; }
+};
+$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('logoutBtn').onclick = async () => { await api('/api/logout', {method:'POST'}); showLogin(); };
+$('addToggle').onclick = () => { $('addBox').classList.toggle('hidden'); $('newName').focus(); };
+
+$('addBtn').onclick = async () => {
+  const name = $('newName').value.trim();
+  if (!name) return;
+  try {
+    const r = await api('/api/agents', {method:'POST', body:{name}});
+    const cmd = `usbguard enroll ${location.origin} ${r.token}`;
+    $('tokenBox').classList.remove('hidden');
+    $('tokenBox').innerHTML =
+      `<div><strong>${esc(r.name)}</strong> 등록 완료. 아래 토큰은 <strong>지금 한 번만</strong> 표시됩니다.</div>
+       <div class="muted" style="margin:6px 0">대상 PC에서 관리자 권한 명령 프롬프트로 실행:</div>
+       <div><code>${esc(cmd)}</code></div>`;
+    $('newName').value = '';
+    load();
+  } catch (e) { alert(e.message); }
+};
+
+$('agents').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  const id = b.dataset.id;
+  try {
+    if (b.dataset.act === 'mode') await api(`/api/agents/${id}/policy`, {method:'POST', body:{mode: b.dataset.mode}});
+    else if (b.dataset.act === 'temp') await api(`/api/agents/${id}/policy`, {method:'POST', body:{temp_minutes: 30}});
+    else if (b.dataset.act === 'del') {
+      if (!confirm(`'${b.dataset.name}' 을(를) 삭제할까요?\n(해당 PC는 서버 보고가 거부되고, 마지막 정책을 유지합니다)`)) return;
+      await api(`/api/agents/${id}`, {method:'DELETE'});
+    }
+    load();
+  } catch (e) { alert(e.message); }
+});
+
+(async () => {
+  try { const m = await api('/api/me'); m.admin ? showMain() : showLogin(); }
+  catch { showLogin(); }
+})();
+</script>
+</body>
+</html>
