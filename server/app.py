@@ -13,7 +13,10 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
+import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +27,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
+import reachability
 from logstore import FILE_RE, MODE_LABEL, RETENTION_DAYS, ControlLogger, DailyLog
 
 BASE_DIR = Path(__file__).parent
@@ -34,6 +38,13 @@ LOG_DIR = Path(os.environ.get("USBGUARD_LOG_DIR") or DATA_DIR / "logs")
 OFFLINE_SEC = 100          # 하트비트(30초) 3번 연속 누락 -> 오프라인
 PENDING_SEC = 75           # 정책 변경 직후 반영 대기 허용 시간
 TAMPER_WINDOW_SEC = 600    # 최근 변조 감지로 취급하는 시간
+
+# PC 생존 확인(ping): 보고가 끊긴 PC 가 "꺼진 것"인지 "켜져 있는데 에이전트만 사라진 것"인지 구분
+PROBE_START_SEC = 60            # 마지막 보고 후 이 시간이 지나면 생존 확인 시작(OFFLINE_SEC 전에 결과 확보)
+PING_OFFLINE_INTERVAL = 30      # 보고가 끊긴 PC 를 ping 하는 주기
+PING_HEALTHY_INTERVAL = 600     # 정상 보고 중인 PC 의 ping 응답 능력 확인 주기
+REACH_FRESH_SEC = 120           # ping 결과를 유효하게 보는 시간
+OFFLINE_ESCALATE_SEC = 24 * 3600  # PC 꺼짐으로 추정돼도 이 시간 넘게 응답이 없으면 '위험'으로 격상
 SESSION_MAX_AGE = 8 * 3600
 
 Mode = Literal["block", "read_only", "allow"]
@@ -95,7 +106,8 @@ CREATE TABLE IF NOT EXISTS agents(
   last_seen TEXT,
   last_ip TEXT,
   report TEXT,
-  last_state TEXT
+  last_state TEXT,
+  ping_ok INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +143,9 @@ def tx():
 def init_db() -> None:
     with tx() as c:
         c.executescript(SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(agents)").fetchall()}
+        if "ping_ok" not in cols:       # 이전 버전 DB 업그레이드
+            c.execute("ALTER TABLE agents ADD COLUMN ping_ok INTEGER NOT NULL DEFAULT 0")
         if not c.execute("SELECT 1 FROM settings WHERE key='session_secret'").fetchone():
             c.execute("INSERT INTO settings VALUES('session_secret', ?)", (secrets.token_hex(32),))
 
@@ -171,6 +186,8 @@ def _file_event(kind: str, detail: str, agent_name: Optional[str]) -> None:
         daily_log.write("INFO", f"[관리자] 정책 변경: {n} | {d}")
     elif kind == "temp_allow":
         daily_log.write("INFO", f"[관리자] 임시 허용: {n} | {d}")
+    elif kind == "ping_capability":
+        daily_log.write("INFO" if d.startswith("ping 응답 확인") else "WARNING", f"생존 확인: {d}", n)
 
 
 def log_event(c: sqlite3.Connection, kind: str, detail: str = "",
@@ -186,14 +203,86 @@ def expected_mode(a: sqlite3.Row, now: datetime) -> str:
     return "allow" if tu and tu > now else a["desired_mode"]
 
 
+# ── PC 생존 확인(ping) ──
+PROBE = reachability.ping           # 테스트에서 가짜로 교체 가능: PROBE(ip) -> bool
+_reach: dict[int, dict] = {}        # agent_id -> {"ok": bool, "at": datetime}
+_reach_lock = threading.Lock()
+_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ping")
+
+
+def reach_status(agent_id: int, now: datetime) -> Optional[bool]:
+    """최근(REACH_FRESH_SEC 이내) ping 결과. 결과가 없거나 오래됐으면 None."""
+    with _reach_lock:
+        r = _reach.get(agent_id)
+    if not r or (now - r["at"]).total_seconds() > REACH_FRESH_SEC:
+        return None
+    return r["ok"]
+
+
+def offline_cause(a: sqlite3.Row, now: datetime, reach: Optional[bool] = None) -> str:
+    """보고가 끊긴 PC 의 원인 추정.
+    agent_down_suspected: ping 은 응답하는데 보고만 없음 (서비스 중지/제거 의심)
+    pc_off: 평소 ping 에 응답하던 PC 가 ping 에도 무응답 (꺼짐/네트워크 단절 추정)
+    pc_off_long: pc_off 상태가 OFFLINE_ESCALATE_SEC 넘게 지속
+    unknown: 확인 불가 (ping 결과 없음, 또는 이 PC 는 원래 ping 에 응답하지 않아 구분 불가)"""
+    if reach is None:
+        reach = reach_status(a["id"], now)
+    if reach is True:
+        return "agent_down_suspected"
+    if reach is False and a["ping_ok"]:
+        age = (now - parse(a["last_seen"])).total_seconds()
+        return "pc_off_long" if age > OFFLINE_ESCALATE_SEC else "pc_off"
+    return "unknown"
+
+
+def probe_agents(now: Optional[datetime] = None) -> None:
+    """보고가 끊긴 PC(및 주기적으로 정상 PC)에 ping 을 보내 생존 여부를 기록.
+    정상 보고 중인 PC 가 ping 에 응답하면 ping_ok=1 로 학습한다.
+    (ICMP 가 막힌 PC 는 ping_ok=0 이므로 무응답을 '꺼짐'으로 단정하지 않는다)"""
+    now = now or now_utc()
+    with tx() as c:
+        agents = c.execute("SELECT id, name, last_seen, last_ip, ping_ok FROM agents").fetchall()
+    jobs = []
+    for a in agents:
+        if not a["last_seen"] or not a["last_ip"]:
+            continue
+        age = (now - parse(a["last_seen"])).total_seconds()
+        offline = age > PROBE_START_SEC
+        with _reach_lock:
+            prev = _reach.get(a["id"])
+        interval = PING_OFFLINE_INTERVAL if offline else PING_HEALTHY_INTERVAL
+        if prev and (now - prev["at"]).total_seconds() < interval:
+            continue
+        jobs.append((a, offline, _pool.submit(PROBE, a["last_ip"])))
+    for a, offline, fut in jobs:
+        try:
+            ok = bool(fut.result(timeout=10))
+        except Exception:
+            ok = False
+        with _reach_lock:
+            _reach[a["id"]] = {"ok": ok, "at": now}
+        if not offline and int(ok) != a["ping_ok"]:      # 정상 보고 중일 때만 '핑 가능 여부' 학습
+            with tx() as c:
+                c.execute("UPDATE agents SET ping_ok=? WHERE id=?", (int(ok), a["id"]))
+                log_event(c, "ping_capability", "ping 응답 확인됨 (꺼짐/중지 구분 가능)" if ok
+                          else "ping 응답 없음 (방화벽 ICMP 차단 가능 — 꺼짐/중지 구분 불가)", a["id"], a["name"])
+
+
 def evaluate(a: sqlite3.Row, now: datetime) -> tuple[str, list[str]]:
-    """반환: (state, reasons). state: ok | pending | warn | danger | unknown"""
+    """반환: (state, reasons). state: ok | pending | warn | danger | offline | unknown"""
     if not a["last_seen"]:
         return "unknown", ["아직 보고 없음 (에이전트 등록 대기)"]
     last_seen = parse(a["last_seen"])
-    age = (now - last_seen).total_seconds()
+    age = int((now - last_seen).total_seconds())
     if age > OFFLINE_SEC:
-        return "danger", [f"{int(age)}초째 보고 없음 (PC 꺼짐 / 네트워크 단절 / 서비스 중지 가능)"]
+        cause = offline_cause(a, now)
+        if cause == "agent_down_suspected":
+            return "danger", [f"{age}초째 보고 없음 — 그런데 PC는 ping에 응답함: 에이전트 서비스 중지/제거 의심 (PC에서 직접 확인 필요)"]
+        if cause == "pc_off":
+            return "offline", [f"{age}초째 보고 없음 — ping도 무응답: PC 꺼짐 / 네트워크 단절 추정"]
+        if cause == "pc_off_long":
+            return "danger", [f"{age // 3600}시간째 PC 응답 없음 — 장기간 꺼져 있거나 PC 가 반출/교체되었는지 확인 필요"]
+        return "danger", [f"{age}초째 보고 없음 (PC 꺼짐 / 네트워크 단절 / 서비스 중지 구분 불가)"]
 
     r = json.loads(a["report"] or "{}")
     danger: list[str] = []
@@ -270,6 +359,7 @@ async def lifespan(_: FastAPI):
         while True:
             await asyncio.sleep(10)
             try:
+                await asyncio.to_thread(probe_agents)
                 await asyncio.to_thread(refresh_states)
                 await asyncio.to_thread(log_observe)
             except Exception as e:      # 감시가 죽지 않도록
@@ -347,6 +437,16 @@ class ModeBody(BaseModel):
     temp_minutes: Optional[int] = Field(default=None, ge=1, le=480)
 
 
+def _reach_view(a: sqlite3.Row, last_seen: Optional[datetime], now: datetime) -> dict:
+    offline = bool(last_seen) and (now - last_seen).total_seconds() > OFFLINE_SEC
+    reach = reach_status(a["id"], now)
+    return {
+        "ping_ok": bool(a["ping_ok"]),                     # 이 PC 가 평소 ping 에 응답하는지(학습값)
+        "reach": reach,                                    # 최근 ping 결과: True/False/None
+        "cause": offline_cause(a, now, reach) if offline else None,
+    }
+
+
 def agent_views(c: sqlite3.Connection, now: datetime) -> list[dict]:
     """PC별 현재 상태 뷰 (GUI 표시와 제어 상태 로그가 같은 판정을 사용)."""
     out = []
@@ -377,6 +477,7 @@ def agent_views(c: sqlite3.Connection, now: datetime) -> list[dict]:
             "last_seen": a["last_seen"],
             "age_sec": int((now - last_seen).total_seconds()) if last_seen else None,
             "last_ip": a["last_ip"],
+            **_reach_view(a, last_seen, now),
         })
     return out
 

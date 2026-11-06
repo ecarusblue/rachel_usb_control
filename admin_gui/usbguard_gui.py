@@ -34,7 +34,19 @@ STATE = {
     "warn":    ("확인 필요", "#a56200", "#fff2cf", "#e0a100"),
     "danger":  ("위험",      "#c0291b", "#fde6e3", "#c0291b"),
     "unknown": ("미확인",    "#6a7488", "#eceff4", "#9aa3b5"),
+    "offline": ("PC 꺼짐(추정)", "#6a7488", "#eceff4", "#9aa3b5"),
 }
+# 보고가 끊긴 위험(danger) 상태의 원인별 배지 문구
+CAUSE_BADGE = {"agent_down_suspected": "에이전트 중지 의심", "pc_off_long": "장기 오프라인",
+               "unknown": "오프라인(확인 불가)"}
+
+
+def state_info(a: dict) -> tuple[str, str, str, str]:
+    """(라벨, 글자색, 배경색, 띠색) — 오프라인 위험은 원인 문구로 표시"""
+    info = STATE.get(a["state"], STATE["unknown"])
+    if a["state"] == "danger" and is_offline(a) and a.get("cause") in CAUSE_BADGE:
+        return (CAUSE_BADGE[a["cause"]],) + info[1:]
+    return info
 MODE = {"block": "차단", "read_only": "읽기 전용", "allow": "허용"}
 MODE_COLOR = {"block": "#168a4f", "read_only": "#e0a100", "allow": "#c0291b"}
 
@@ -155,6 +167,20 @@ def verify(a: dict) -> list[tuple[str, str, str]]:
             ("레지스트리", "pass" if reg else "fail", "✓ 정상" if reg else "✗ 불일치"), dev]
 
 
+def reach_text(a: dict) -> str:
+    """ping 기반 PC 생존 확인 문구"""
+    reach = a.get("reach")
+    if a["state"] == "unknown":
+        return "—"
+    if not is_offline(a):
+        return "보고 중 (ping 응답 가능)" if a.get("ping_ok") else "보고 중 (ping 불가 — 꺼짐/중지 구분 불가)"
+    if reach is True:
+        return "ping 응답함 — PC는 켜져 있음"
+    if reach is False:
+        return "ping 무응답" + ("" if a.get("ping_ok") else " (이 PC는 평소에도 ping 불가 → 구분 불가)")
+    return "확인 중…"
+
+
 CHK_COLOR = {"pass": "#168a4f", "fail": "#c0291b", "na": "#6a7488"}
 
 
@@ -182,7 +208,7 @@ class Kpi(QFrame):
 class PcCard(QFrame):
     def __init__(self, a: dict, win: "MainWindow"):
         super().__init__()
-        st_label, st_fg, st_bg, bar = STATE.get(a["state"], STATE["unknown"])
+        st_label, st_fg, st_bg, bar = state_info(a)
         self.setObjectName("pc")
         self.setStyleSheet(f"QFrame#pc{{background:#fff;border:1px solid #e2e6ee;"
                            f"border-left:6px solid {bar};border-radius:10px;}}")
@@ -252,6 +278,7 @@ class PcCard(QFrame):
             form.addRow(label(k, "color:#6a7488;font-size:12px;border:none"), label(v, "font-size:12px;border:none", True))
 
         add("마지막 보고", fmt_age(a.get("age_sec")))
+        add("PC 생존 확인", reach_text(a))
         add("목표 / PC 보고", f"{MODE.get(a['desired_mode'], '—')} / {MODE.get(a.get('effective_mode'), '—')}")
         add("USBSTOR / WP", f"Start={a.get('usbstor_start', '—')} / WriteProtect={a.get('write_protect', '—')}")
         add("정책 재적용", fmt_time(a.get("last_enforce_utc")))
@@ -636,6 +663,8 @@ class MainWindow(QMainWindow):
         n = len(ags)
         cnt = lambda s: sum(1 for a in ags if a["state"] == s)
         ok, warn, danger, pend, unk = cnt("ok"), cnt("warn"), cnt("danger"), cnt("pending"), cnt("unknown")
+        off = cnt("offline")
+        suspected = sum(1 for a in ags if a["state"] == "danger" and a.get("cause") == "agent_down_suspected")
         blocked = sum(1 for a in ags if a["expected_mode"] == "block" and a["state"] in ("ok", "pending"))
         usb = sum(len(a["usb_devices"]) for a in ags)
         tamper = sum(a.get("tamper_count") or 0 for a in ags)
@@ -643,12 +672,17 @@ class MainWindow(QMainWindow):
         icon, title, sub, fg, bg = "✅", "모든 PC의 USB 제어가 정상입니다", f"{n}대 중 {ok}대 정상", "#168a4f", "#e1f5e9"
         if n == 0:
             icon, title, sub, fg, bg = "➕", "등록된 PC가 없습니다", "“+ PC 등록”으로 대상 PC를 추가하세요", "#6a7488", "#eceff4"
+        elif suspected:
+            icon, title, sub, fg, bg = "🚨", f"에이전트 중지/제거 의심 {suspected}대 — PC는 켜져 있는데 보고가 없습니다", \
+                "해당 PC에서 UsbGuard 서비스가 실행 중인지 직접 확인하세요", "#c0291b", "#fde6e3"
         elif danger:
             icon, title, sub, fg, bg = "🚨", f"위험 {danger}대 — 즉시 확인이 필요합니다", "보고 끊김 또는 설정 변조가 감지되었습니다", "#c0291b", "#fde6e3"
         elif warn:
             icon, title, sub, fg, bg = "⚠", f"확인 필요 {warn}대", "정책 불일치 또는 차단 모드에서 USB 저장장치가 연결되어 있습니다", "#a56200", "#fff2cf"
         elif pend or unk:
             icon, title, sub, fg, bg = "⏳", "반영/첫 보고를 기다리는 PC가 있습니다", f"반영 대기 {pend}대 · 미확인 {unk}대", "#6a7488", "#eceff4"
+        elif off:
+            icon, title, sub, fg, bg = "💤", f"꺼져 있는 PC {off}대 (ping 무응답)", "전원이 꺼졌거나 네트워크에서 분리된 것으로 추정됩니다", "#6a7488", "#eceff4"
         self.banner.setText(f"<span style='font-size:20px'>{icon}</span>&nbsp; <b style='font-size:15px'>{title}</b>"
                             f"<br><span style='font-size:12px'>{sub}</span>")
         self.banner.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:12px 16px;")
@@ -659,7 +693,8 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
         for t, v, c in [("관리 PC", n, "#1b2333"), ("정상", ok, "#168a4f"),
                         ("확인 필요", warn, "#a56200" if warn else "#1b2333"),
-                        ("위험 / 오프라인", danger, "#c0291b" if danger else "#1b2333"),
+                        ("위험", danger, "#c0291b" if danger else "#1b2333"),
+                        ("꺼짐(추정)", off, "#6a7488"),
                         ("차단 적용 중", blocked, "#168a4f"),
                         ("연결된 USB 저장장치", usb, "#a56200" if usb else "#1b2333")]:
             self.kpi_row.addWidget(Kpi(t, v, c), 1)

@@ -24,9 +24,12 @@ SNAPSHOT_SEC = 600         # 변화가 없어도 이 주기로 현재 제어 상
 OFFLINE_SEC = 100          # server/app.py 의 OFFLINE_SEC 와 동일 기준
 FILE_RE = re.compile(r"log_(\d{8})\.log")      # fullmatch 로만 사용
 
-STATE_LABEL = {"ok": "제어 정상", "pending": "반영 대기", "warn": "확인 필요", "danger": "위험", "unknown": "미확인"}
+STATE_LABEL = {"ok": "제어 정상", "pending": "반영 대기", "warn": "확인 필요", "danger": "위험", "unknown": "미확인",
+               "offline": "PC 꺼짐(추정)"}
+CAUSE_LABEL = {"agent_down_suspected": "에이전트 중지 의심", "pc_off_long": "장기 오프라인(확인 필요)"}
 MODE_LABEL = {"block": "차단", "read_only": "읽기 전용", "allow": "허용"}
-LEVEL_OF_STATE = {"ok": "INFO", "pending": "INFO", "unknown": "INFO", "warn": "WARNING", "danger": "ERROR"}
+LEVEL_OF_STATE = {"ok": "INFO", "pending": "INFO", "unknown": "INFO", "offline": "INFO",
+                  "warn": "WARNING", "danger": "ERROR"}
 
 
 def default_log_dir() -> Path:
@@ -129,7 +132,7 @@ def _is_offline(a: dict) -> bool:
 
 def state_label(a: dict) -> str:
     if a["state"] == "danger" and _is_offline(a):
-        return "오프라인(확인 불가)"
+        return CAUSE_LABEL.get(a.get("cause") or "", "오프라인(확인 불가)")
     return STATE_LABEL.get(a["state"], a["state"])
 
 
@@ -149,7 +152,7 @@ def describe(a: dict) -> str:
     if a.get("temp_until"):
         parts.insert(2, f"임시허용~{_local_clock(a['temp_until'])}")
     line = " | ".join(parts)
-    if a["state"] in ("warn", "danger") and a.get("reasons"):
+    if a["state"] in ("warn", "danger", "offline") and a.get("reasons"):
         line += " | 사유: " + "; ".join(a["reasons"])
     return line
 

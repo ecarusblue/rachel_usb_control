@@ -49,12 +49,12 @@
   .banner .sub { font-weight:400; font-size:13px; opacity:.9; }
 
   /* KPI */
-  .kpis { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:16px; }
+  .kpis { display:grid; grid-template-columns:repeat(7,1fr); gap:12px; margin-bottom:16px; }
   .kpi { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
   .kpi .label { color:var(--muted); font-size:12px; }
   .kpi .num { font-size:28px; font-weight:700; line-height:1.2; margin-top:2px; }
   .kpi.ok .num { color:var(--ok); } .kpi.warn .num { color:var(--warn); } .kpi.danger .num { color:var(--danger); }
-  @media (max-width:1000px){ .kpis{grid-template-columns:repeat(3,1fr);} }
+  @media (max-width:1000px){ .kpis{grid-template-columns:repeat(4,1fr);} }
   @media (max-width:560px){ .kpis{grid-template-columns:repeat(2,1fr);} }
 
   .layout { display:grid; grid-template-columns:1fr 330px; gap:16px; align-items:start; }
@@ -67,13 +67,13 @@
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:14px; }
   .pc { background:var(--card); border:1px solid var(--line); border-left:6px solid var(--unk); border-radius:10px; padding:14px 16px; }
   .pc.ok { border-left-color:var(--ok); } .pc.warn { border-left-color:#e0a100; }
-  .pc.danger { border-left-color:var(--danger); } .pc.pending { border-left-color:var(--pend); }
+  .pc.offline { border-left-color:var(--unk); } .pc.danger { border-left-color:var(--danger); } .pc.pending { border-left-color:var(--pend); }
   .pc-head { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
   .pc-name { font-size:16px; font-weight:700; }
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-weight:600; font-size:12px; white-space:nowrap; }
   .b-ok{color:var(--ok);background:var(--ok-bg)} .b-warn{color:var(--warn);background:var(--warn-bg)}
   .b-danger{color:var(--danger);background:var(--danger-bg)} .b-pending{color:var(--pend);background:var(--pend-bg)}
-  .b-unknown{color:var(--unk);background:var(--unk-bg)}
+  .b-unknown,.b-offline{color:var(--unk);background:var(--unk-bg)}
   .control { display:flex; align-items:center; gap:10px; margin:12px 0 8px; padding:10px 12px; background:#f6f8fc; border-radius:8px; }
   .control .ico { font-size:24px; }
   .control .t1 { font-weight:700; }
@@ -171,7 +171,22 @@ const STATE = {
   warn:    {label:'확인 필요', cls:'warn'},
   danger:  {label:'위험',      cls:'danger'},
   unknown: {label:'미확인',    cls:'unknown'},
+  offline: {label:'PC 꺼짐(추정)', cls:'offline'},
 };
+// 보고가 끊긴 위험 상태의 원인별 배지 문구
+const CAUSE_BADGE = {agent_down_suspected:'에이전트 중지 의심', pc_off_long:'장기 오프라인', unknown:'오프라인(확인 불가)'};
+function stateInfo(a) {
+  const st = STATE[a.state] || STATE.unknown;
+  if (a.state === 'danger' && isOffline(a) && CAUSE_BADGE[a.cause]) return {...st, label: CAUSE_BADGE[a.cause]};
+  return st;
+}
+function reachText(a) {
+  if (a.state === 'unknown') return '—';
+  if (!isOffline(a)) return a.ping_ok ? '보고 중 (ping 응답 가능)' : '보고 중 (ping 불가 — 꺼짐/중지 구분 불가)';
+  if (a.reach === true) return 'ping 응답함 — PC는 켜져 있음';
+  if (a.reach === false) return 'ping 무응답' + (a.ping_ok ? '' : ' (이 PC는 평소에도 ping 불가 → 구분 불가)');
+  return '확인 중…';
+}
 const MODE = {block:'차단', read_only:'읽기 전용', allow:'허용'};
 const MODE_COLOR = {block:'#168a4f', read_only:'#e0a100', allow:'#c0291b'};
 let timer = null;
@@ -222,23 +237,26 @@ async function load() {
 function renderSummary(list) {
   const n = list.length;
   const cnt = s => list.filter(a => a.state === s).length;
-  const ok = cnt('ok'), warn = cnt('warn'), danger = cnt('danger'), pend = cnt('pending'), unk = cnt('unknown');
+  const ok = cnt('ok'), warn = cnt('warn'), danger = cnt('danger'), pend = cnt('pending'), unk = cnt('unknown'), off = cnt('offline');
+  const suspected = list.filter(a => a.state === 'danger' && a.cause === 'agent_down_suspected').length;
   const blocked = list.filter(a => a.expected_mode === 'block' && ['ok','pending'].includes(a.state)).length;
   const usb = list.reduce((s, a) => s + a.usb_devices.length, 0);
   const tamper = list.reduce((s, a) => s + (a.tamper_count || 0), 0);
 
   let cls = 'ok', icon = '✅', title = '모든 PC의 USB 제어가 정상입니다', sub = `${n}대 중 ${ok}대 정상`;
   if (n === 0) { cls = 'unknown'; icon = '➕'; title = '등록된 PC가 없습니다'; sub = '“+ PC 등록”으로 대상 PC를 추가하세요'; }
+  else if (suspected) { cls = 'danger'; icon = '🚨'; title = `에이전트 중지/제거 의심 ${suspected}대 — PC는 켜져 있는데 보고가 없습니다`; sub = '해당 PC에서 UsbGuard 서비스가 실행 중인지 직접 확인하세요'; }
   else if (danger) { cls = 'danger'; icon = '🚨'; title = `위험 ${danger}대 — 즉시 확인이 필요합니다`; sub = '보고 끊김 또는 설정 변조가 감지되었습니다'; }
   else if (warn) { cls = 'warn'; icon = '⚠️'; title = `확인 필요 ${warn}대`; sub = '정책 불일치 또는 차단 모드에서 USB 저장장치가 연결되어 있습니다'; }
   else if (pend || unk) { cls = 'unknown'; icon = '⏳'; title = '반영/첫 보고를 기다리는 PC가 있습니다'; sub = `반영 대기 ${pend}대 · 미확인 ${unk}대`; }
+  else if (off) { cls = 'unknown'; icon = '💤'; title = `꺼져 있는 PC ${off}대 (ping 무응답)`; sub = '전원이 꺼졌거나 네트워크에서 분리된 것으로 추정됩니다'; }
   $('banner').className = 'banner ' + cls;
   $('banner').innerHTML = `<span class="big">${icon}</span><div><div>${title}</div><div class="sub">${esc(sub)}</div></div>`;
 
   const k = (label, num, c='') => `<div class="kpi ${c}"><div class="label">${label}</div><div class="num">${num}</div></div>`;
   $('kpis').innerHTML =
     k('관리 PC', n) + k('정상', ok, 'ok') + k('확인 필요', warn, warn ? 'warn' : '') +
-    k('위험 / 오프라인', danger, danger ? 'danger' : '') + k('차단 적용 중', blocked, 'ok') +
+    k('위험', danger, danger ? 'danger' : '') + k('꺼짐(추정)', off) + k('차단 적용 중', blocked, 'ok') +
     k('연결된 USB 저장장치', usb, usb ? 'warn' : '') ;
 
   const modes = ['block', 'read_only', 'allow'];
@@ -283,7 +301,7 @@ const chkLabel = {pass:'✓ 정상', fail:'✗ 불일치', na:'확인 불가'};
 function renderGrid(list) {
   $('empty').classList.toggle('hidden', list.length > 0);
   $('grid').innerHTML = list.map(a => {
-    const st = STATE[a.state] || STATE.unknown;
+    const st = stateInfo(a);
     const c = controlText(a);
     const checks = verify(a).map(([n, r]) => {
       const text = n === 'USB 장치' && r === 'fail' ? `${a.usb_devices.length}개 연결` : (n === 'USB 장치' && r === 'pass' ? '✓ 없음' : chkLabel[r]);
@@ -305,6 +323,7 @@ function renderGrid(list) {
       ${devs}
       <dl>
         <dt>마지막 보고</dt><dd>${fmtAge(a.age_sec)}</dd>
+        <dt>PC 생존 확인</dt><dd>${esc(reachText(a))}</dd>
         <dt>목표 / PC 보고</dt><dd>${esc(MODE[a.desired_mode])} / ${esc(MODE[a.effective_mode] || '—')}</dd>
         <dt>USBSTOR / WP</dt><dd>Start=${a.usbstor_start ?? '—'} / WriteProtect=${a.write_protect ?? '—'}</dd>
         <dt>정책 재적용</dt><dd>${fmtTime(a.last_enforce_utc)}</dd>

@@ -1,6 +1,6 @@
 import sys, time, threading
 from datetime import timedelta
-import os; R=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."); sys.path.insert(0, os.path.join(R,"server")); sys.path.insert(0, os.path.join(R,"admin_gui"))
+import os, tempfile; os.environ["USBGUARD_DATA"] = tempfile.mkdtemp(); R=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..",".."); sys.path.insert(0, os.path.join(R,"server")); sys.path.insert(0, os.path.join(R,"admin_gui"))
 import app as A, uvicorn
 from fastapi.testclient import TestClient
 
@@ -43,8 +43,18 @@ check("로그인 성공", d.api is not None and d.result() == 1)
 w = G.MainWindow(d.api); w.show(); pump(2.5)
 check("PC 카드 3개 렌더", sum(1 for i in range(w.grid.count()) if isinstance(w.grid.itemAt(i).widget(), G.PcCard)) == 3)
 check("이벤트 목록 채움", w.events.count() > 0)
-check("KPI 6개", w.kpi_row.count() == 6)
+check("KPI 7개", w.kpi_row.count() == 7)
 w.grab().save("/tmp/gui.png")
+
+# 오프라인 원인 표시 (ping 생존 확인)
+base = {"state": "danger", "age_sec": 400, "ping_ok": True}
+check("배지: 에이전트 중지 의심", G.state_info({**base, "cause": "agent_down_suspected"})[0] == "에이전트 중지 의심")
+check("배지: 원인 불명 오프라인", G.state_info({**base, "cause": "unknown"})[0] == "오프라인(확인 불가)")
+check("배지: PC 꺼짐(추정)", G.state_info({"state": "offline", "age_sec": 400})[0] == "PC 꺼짐(추정)")
+check("생존 확인 문구: ping 응답", "켜져 있음" in G.reach_text({**base, "reach": True}))
+check("생존 확인 문구: ping 무응답", G.reach_text({**base, "state": "offline", "reach": False}) == "ping 무응답")
+check("생존 확인 문구: ping 불가 PC 는 구분 불가 안내", "구분 불가" in G.reach_text({**base, "ping_ok": False, "reach": False}))
+check("꺼짐 PC 도 검증칸은 '확인 불가'", all(r[1] == "na" for r in G.verify({**base, "state": "offline", "effective_mode": "block", "expected_mode": "block", "usb_devices": []})))
 
 # 정책 변경: PC1 -> allow
 a1 = next(a for a in d.api.call("GET","/api/agents") if a["name"]=="공부방-PC1")

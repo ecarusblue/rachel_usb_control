@@ -88,6 +88,8 @@ nssm start UsbGuardServer
 | 로그 폴더 | `<데이터 폴더>\logs` | 환경변수 `USBGUARD_LOG_DIR` |
 | 관리자 비밀번호 | (없음, 설정 필수) | `python manage.py set-admin-password` |
 | 오프라인(위험) 판정 | 보고 100초 이상 없음 | `server/app.py` `OFFLINE_SEC` |
+| PC 생존 확인(ping) | 보고 60초 이상 끊기면 30초마다, 정상 PC 는 10분마다 | `server/app.py` `PROBE_START_SEC` 등 |
+| 장기 무응답 격상 | ping 도 안 되는 상태가 24시간 넘으면 위험 | `server/app.py` `OFFLINE_ESCALATE_SEC` |
 | 로그 보관 | 오늘 포함 14일 | `server/logstore.py` `RETENTION_DAYS` |
 | 주기 점검 로그 | 10분 | `server/logstore.py` `SNAPSHOT_SEC` |
 
@@ -188,6 +190,15 @@ C:\UsbGuard\admin\usbguard.exe enroll http://<서버IP>:8080 <토큰>
 - 로컬 비밀번호를 묻습니다. 등록되면 **30초 이내**에 첫 보고가 갑니다.
 - 등록 후에는 서버가 정책을 관리하고, 이 PC 에서의 로컬 모드 변경(`block/allow/…`)은 거부됩니다.
 
+### B-5-1. 서버의 ping 허용 (권장 — "꺼짐"과 "에이전트 제거"를 구분하는 데 필요)
+서버는 보고가 끊긴 PC 에 ping 을 보내 **PC 가 꺼진 것인지, 켜져 있는데 에이전트만 멈춘/삭제된 것인지** 구분합니다.
+Windows 기본 방화벽은 ping(ICMP 에코)을 막으므로, 이 PC 에서 서버 IP 에 대해서만 허용해 두세요. (관리자 권한 명령 프롬프트)
+```
+netsh advfirewall firewall add rule name="UsbGuard server ping" dir=in action=allow protocol=icmpv4:8,any remoteip=<서버IP>
+```
+- 허용하지 않아도 동작은 하지만, 그 PC 는 서버가 "ping 불가 PC"로 학습하여 보고가 끊겼을 때 **원인 구분 불가(위험)** 로만 표시합니다.
+- 제거(언인스톨) 시 이 규칙도 삭제: `netsh advfirewall firewall delete rule name="UsbGuard server ping"` (미검증 명령 — Windows 에서 확인 필요)
+
 ## B-6. 확인
 ```
 C:\UsbGuard\admin\usbguard.exe status
@@ -239,9 +250,19 @@ sc.exe delete UsbGuardSvc
 | 정상 | 목표 정책과 PC 실제값(서비스 판정 + 레지스트리 실제값)이 일치하고, 차단 모드에서 USB 저장장치가 없음 |
 | 반영 대기 | 정책을 방금 바꿨고 PC 의 다음 보고(최대 30초)를 기다리는 중 |
 | 확인 필요 | 정책 불일치, 또는 **차단 모드인데 USB 저장장치가 연결되어 있음** (이미 꽂혀 있던 장치) |
-| 위험 | 100초 이상 보고 없음(PC 꺼짐/네트워크 단절/서비스 중지), 또는 최근 10분 내 레지스트리 변조 감지 |
+| 위험 | 최근 10분 내 레지스트리 변조 감지, 또는 아래 "보고 끊김" 중 위험으로 분류되는 경우 |
+| PC 꺼짐(추정) | 100초 이상 보고 없음 + **ping 도 무응답** (평소 ping 에 응답하던 PC 만 해당). 정보성 — 알람 아님 |
 | 미확인 | 등록만 되고 아직 보고 없음 |
 
+**보고가 100초 이상 끊겼을 때 서버가 ping 으로 원인을 추정합니다.**
+
+| 보고 | ping | 표시 | 의미 |
+|---|---|---|---|
+| 끊김 | 응답함 | **위험 · 에이전트 중지 의심** | PC 는 켜져 있는데 보고만 없음 → 서비스 중지/제거 의심. 해당 PC 에서 직접 확인 |
+| 끊김 | 무응답 (평소엔 응답하던 PC) | PC 꺼짐(추정) | 전원 off / 네트워크 분리. 24시간 넘으면 위험(장기 오프라인)으로 격상 |
+| 끊김 | 무응답 (원래 ping 불가 PC) | 위험 · 오프라인(확인 불가) | 방화벽이 ICMP 를 막고 있으면 꺼짐인지 제거인지 알 수 없으므로 꺼짐으로 단정하지 않음 |
+
+"원래 ping 에 응답하는 PC"는 **정상 보고 중일 때 ping 이 되는지 서버가 10분마다 확인해 학습**합니다.
 보고가 끊긴 PC 는 마지막 값으로 "정상"처럼 보이지 않도록 검증 칸을 **확인 불가**로 표시합니다.
 
 웹 현황판 화면 예시:
@@ -265,13 +286,15 @@ cd server
 python tests/smoke_test.py        # API/상태 판정
 python tests/logstore_test.py     # 일별 로그·14일 삭제 단위 테스트
 python tests/server_log_test.py   # 서버 로그 통합 (시작/삭제/관리자 동작/조회 API/감시 루프)
+python tests/reachability_test.py # ping 으로 꺼짐 vs 에이전트 중지 구분 (가짜 ping 사용)
 
 # 관리자 앱 (pip install PySide6-Essentials httpx)
 QT_QPA_PLATFORM=offscreen python admin_gui/tests/gui_test.py
 ```
 
 ## 한계 / 보안 메모
-- **에이전트 자기 보고 기반**: 로컬 관리자 권한 사용자는 서비스를 중지·삭제할 수 있고, 이 경우 서버는 "보고 끊김(위험)"만 알 수 있음. 일반 사용자 권한 운영이 전제
+- **에이전트 자기 보고 기반**: 로컬 관리자 권한 사용자는 서비스를 중지·삭제할 수 있음. 이 경우 서버는 보고 끊김을 감지하고, ping 으로 "PC 는 켜져 있음"이면 **에이전트 중지 의심**으로 알려 줍니다. 일반 사용자 권한 운영이 전제
+- **무단 제거 감지의 한계**: 제거 직후 PC 를 바로 끄면 "꺼짐(추정)"으로 보이고, 이후 켜져서 ping 에 응답하는 순간 "에이전트 중지 의심"으로 바뀝니다(재부팅 후에도 보고가 없으면). ICMP 를 막은 PC 는 구분이 안 됩니다. ping 응답은 IP 기준이라 같은 IP 의 다른 장비가 응답하면 오판할 수 있어 고정 IP/DHCP 예약 권장
 - **HTTP 평문**: 사내망 전용 가정. 토큰이 평문 전송되므로 외부 노출 금지. 필요 시 HTTPS 리버스 프록시(Caddy/nginx) 뒤에 두고 `https_only=True` 로 전환
 - 이미 꽂혀 있는 USB 는 즉시 해제되지 않음(재연결 시 차단). WMI `InterfaceType='USB'` 기준이라 UASP 방식 일부 외장 SSD 는 목록에서 빠질 수 있음
 - 임시 허용 만료 시각은 UTC 기준이며 PC 시계 오차의 영향을 받음 (같은 대역 3대 규모에선 무시 가능). PC 시간 동기화 권장
