@@ -3,54 +3,118 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UsbGuard 관리 콘솔</title>
+<title>UsbGuard 현황판</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
-    --bg:#f5f6f8; --card:#fff; --text:#1d2433; --muted:#6b7385; --line:#e3e6ec;
-    --ok:#1a7f4b; --ok-bg:#e3f5ea; --warn:#9a6700; --warn-bg:#fff3d1;
-    --danger:#b42318; --danger-bg:#fde7e4; --pend:#3b5bdb; --pend-bg:#e7ecff; --unk:#6b7385; --unk-bg:#eceef2;
+    --bg:#f2f4f8; --card:#fff; --text:#1b2333; --muted:#6a7488; --line:#e2e6ee;
+    --ok:#168a4f; --ok-bg:#e1f5e9;
+    --warn:#a56200; --warn-bg:#fff2cf;
+    --danger:#c0291b; --danger-bg:#fde6e3;
+    --pend:#3a56d4; --pend-bg:#e6ebff;
+    --unk:#6a7488; --unk-bg:#eceff4;
     --accent:#2b4acb;
   }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,"Segoe UI","Malgun Gothic",sans-serif; background:var(--bg); color:var(--text); }
-  header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 24px; display:flex; align-items:center; justify-content:space-between; }
-  header h1 { font-size:16px; margin:0; }
-  main { max-width:1100px; margin:20px auto; padding:0 16px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
-  .card h2 { font-size:14px; margin:0 0 12px; }
+  .hidden { display:none !important; }
+  .muted { color:var(--muted); font-size:12px; }
   button { font:inherit; border:1px solid var(--line); background:#fff; border-radius:6px; padding:5px 10px; cursor:pointer; color:var(--text); }
-  button:hover { background:#f0f2f6; }
+  button:hover { background:#eef1f7; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.primary:hover { background:#2340b0; }
-  button.danger { color:var(--danger); }
+  button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.del { color:var(--danger); }
   input { font:inherit; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
-  table { width:100%; border-collapse:collapse; }
-  th { text-align:left; font-weight:600; color:var(--muted); font-size:12px; padding:6px 8px; border-bottom:1px solid var(--line); }
-  td { padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  tr:last-child td { border-bottom:none; }
+  code { background:#eef0f5; padding:2px 6px; border-radius:4px; word-break:break-all; }
+
+  /* 상단바 */
+  header { background:#16203a; color:#fff; padding:12px 24px; display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.2px; }
+  header .right { display:flex; gap:12px; align-items:center; font-size:12px; color:#b9c3dc; }
+  header button { background:transparent; color:#fff; border-color:#44507a; }
+  header button:hover { background:#25315a; }
+  .live { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3ddc84; margin-right:6px; animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  main { max-width:1280px; margin:20px auto; padding:0 16px; }
+
+  /* 전체 배너 */
+  .banner { border-radius:10px; padding:14px 18px; margin-bottom:16px; display:flex; align-items:center; gap:14px; font-weight:600; }
+  .banner .big { font-size:22px; }
+  .banner.ok { background:var(--ok-bg); color:var(--ok); }
+  .banner.warn { background:var(--warn-bg); color:var(--warn); }
+  .banner.danger { background:var(--danger-bg); color:var(--danger); }
+  .banner.unknown { background:var(--unk-bg); color:var(--unk); }
+  .banner .sub { font-weight:400; font-size:13px; opacity:.9; }
+
+  /* KPI */
+  .kpis { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .kpi .num { font-size:28px; font-weight:700; line-height:1.2; margin-top:2px; }
+  .kpi.ok .num { color:var(--ok); } .kpi.warn .num { color:var(--warn); } .kpi.danger .num { color:var(--danger); }
+  @media (max-width:1000px){ .kpis{grid-template-columns:repeat(3,1fr);} }
+  @media (max-width:560px){ .kpis{grid-template-columns:repeat(2,1fr);} }
+
+  .layout { display:grid; grid-template-columns:1fr 330px; gap:16px; align-items:start; }
+  @media (max-width:1100px){ .layout{grid-template-columns:1fr;} }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { font-size:14px; margin:0 0 12px; }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+
+  /* PC 카드 */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:14px; }
+  .pc { background:var(--card); border:1px solid var(--line); border-left:6px solid var(--unk); border-radius:10px; padding:14px 16px; }
+  .pc.ok { border-left-color:var(--ok); } .pc.warn { border-left-color:#e0a100; }
+  .pc.danger { border-left-color:var(--danger); } .pc.pending { border-left-color:var(--pend); }
+  .pc-head { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+  .pc-name { font-size:16px; font-weight:700; }
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-weight:600; font-size:12px; white-space:nowrap; }
-  .ok { color:var(--ok); background:var(--ok-bg); } .warn { color:var(--warn); background:var(--warn-bg); }
-  .danger-b { color:var(--danger); background:var(--danger-bg); } .pending { color:var(--pend); background:var(--pend-bg); }
-  .unknown { color:var(--unk); background:var(--unk-bg); }
-  .reasons { color:var(--muted); font-size:12px; margin-top:4px; }
-  .muted { color:var(--muted); font-size:12px; }
-  .actions { display:flex; flex-wrap:wrap; gap:4px; }
-  .mode-on { background:var(--accent); color:#fff; border-color:var(--accent); }
-  .login { max-width:340px; margin:80px auto; }
+  .b-ok{color:var(--ok);background:var(--ok-bg)} .b-warn{color:var(--warn);background:var(--warn-bg)}
+  .b-danger{color:var(--danger);background:var(--danger-bg)} .b-pending{color:var(--pend);background:var(--pend-bg)}
+  .b-unknown{color:var(--unk);background:var(--unk-bg)}
+  .control { display:flex; align-items:center; gap:10px; margin:12px 0 8px; padding:10px 12px; background:#f6f8fc; border-radius:8px; }
+  .control .ico { font-size:24px; }
+  .control .t1 { font-weight:700; }
+  .checks { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:10px; }
+  .chk { border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:12px; text-align:center; }
+  .chk .v { font-weight:700; font-size:15px; display:block; }
+  .chk.pass .v { color:var(--ok); } .chk.fail .v { color:var(--danger); } .chk.na .v { color:var(--unk); }
+  .reasons { font-size:12px; color:var(--muted); margin-bottom:8px; }
+  .reasons.bad { color:var(--danger); }
+  dl { display:grid; grid-template-columns:90px 1fr; gap:3px 8px; margin:0 0 10px; font-size:12px; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+  .devs { font-size:12px; margin-bottom:10px; padding:6px 8px; background:var(--warn-bg); border-radius:6px; color:var(--warn); }
+  .actions { display:flex; flex-wrap:wrap; gap:4px; border-top:1px solid var(--line); padding-top:10px; }
+  .empty { text-align:center; color:var(--muted); padding:40px 10px; }
+
+  /* 모드 분포 막대 */
+  .dist { display:flex; height:10px; border-radius:6px; overflow:hidden; background:var(--unk-bg); margin:6px 0 4px; }
+  .dist span { display:block; height:100%; }
+  .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; }
+
+  /* 이벤트 */
+  .ev { list-style:none; padding:0; margin:0; max-height:640px; overflow:auto; }
+  .ev li { padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .ev li:last-child { border-bottom:none; }
+  .ev .k { font-weight:600; }
+
+  /* 로그인 / 토큰 */
+  .login { max-width:340px; margin:100px auto; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:24px; }
   .login input { width:100%; margin:8px 0 12px; }
   .err { color:var(--danger); min-height:20px; font-size:13px; }
+  .addbox { margin-bottom:14px; padding:12px; background:#f6f8fc; border-radius:8px; }
+  .tokenbox { background:#fff; border:1px dashed #aab3c8; border-radius:8px; padding:12px; margin-top:10px; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  code { background:#eef0f4; padding:2px 6px; border-radius:4px; word-break:break-all; }
-  .tokenbox { background:#f7f8fb; border:1px dashed #b9c0d0; border-radius:8px; padding:12px; margin-top:12px; }
-  .ev td { padding:6px 8px; font-size:13px; }
-  .hidden { display:none; }
 </style>
 </head>
 <body>
 
 <div id="loginView" class="hidden">
-  <div class="card login">
-    <h2>UsbGuard 관리 콘솔</h2>
+  <div class="login">
+    <h2 style="margin-top:0">🔒 UsbGuard 현황판</h2>
     <label>관리자 비밀번호</label>
     <input id="pw" type="password" autocomplete="current-password">
     <div class="err" id="loginErr"></div>
@@ -60,32 +124,41 @@
 
 <div id="mainView" class="hidden">
   <header>
-    <h1>🔒 UsbGuard 관리 콘솔</h1>
-    <div class="row"><span class="muted" id="refreshInfo"></span><button id="logoutBtn">로그아웃</button></div>
+    <h1>🔒 UsbGuard USB 제어 현황판</h1>
+    <div class="right"><span><i class="live"></i><span id="refreshInfo">연결 중…</span></span><button id="logoutBtn">로그아웃</button></div>
   </header>
   <main>
-    <div class="card">
-      <div class="row" style="justify-content:space-between;margin-bottom:8px">
-        <h2 style="margin:0">대상 PC</h2>
-        <button id="addToggle">+ PC 등록</button>
-      </div>
-      <div id="addBox" class="hidden" style="margin-bottom:12px">
-        <div class="row">
-          <input id="newName" placeholder="PC 이름 (예: 영어공부방-PC1)" maxlength="64" style="min-width:260px">
-          <button class="primary" id="addBtn">등록하고 토큰 발급</button>
-        </div>
-        <div id="tokenBox" class="tokenbox hidden"></div>
-      </div>
-      <table>
-        <thead><tr><th>PC</th><th>상태</th><th>정책</th><th>USB 저장장치</th><th>마지막 보고</th><th>정책 변경</th></tr></thead>
-        <tbody id="agents"></tbody>
-      </table>
-      <div id="empty" class="muted hidden" style="padding:16px 8px">등록된 PC가 없습니다. "+ PC 등록"으로 시작하세요.</div>
-    </div>
+    <div id="banner" class="banner unknown"></div>
+    <div class="kpis" id="kpis"></div>
 
-    <div class="card">
-      <h2>최근 이벤트</h2>
-      <table class="ev"><tbody id="events"></tbody></table>
+    <div class="layout">
+      <section class="panel">
+        <div class="toolbar">
+          <h2 style="margin:0">관리 대상 PC</h2>
+          <button id="addToggle">+ PC 등록</button>
+        </div>
+        <div id="addBox" class="addbox hidden">
+          <div class="row">
+            <input id="newName" placeholder="PC 이름 (예: 공부방-PC1)" maxlength="64" style="min-width:240px">
+            <button class="primary" id="addBtn">등록하고 토큰 발급</button>
+          </div>
+          <div id="tokenBox" class="tokenbox hidden"></div>
+        </div>
+        <div class="grid" id="grid"></div>
+        <div id="empty" class="empty hidden">등록된 PC가 없습니다. “+ PC 등록”으로 시작하세요.</div>
+      </section>
+
+      <aside>
+        <div class="panel" style="margin-bottom:16px">
+          <h2>정책 분포</h2>
+          <div class="dist" id="dist"></div>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div class="panel">
+          <h2>최근 이벤트</h2>
+          <ul class="ev" id="events"></ul>
+        </div>
+      </aside>
     </div>
   </main>
 </div>
@@ -93,18 +166,18 @@
 <script>
 const $ = id => document.getElementById(id);
 const STATE = {
-  ok:      ['정상',      'ok'],
-  pending: ['반영 대기', 'pending'],
-  warn:    ['확인 필요', 'warn'],
-  danger:  ['위험',      'danger-b'],
-  unknown: ['미확인',    'unknown'],
+  ok:      {label:'정상',      cls:'ok'},
+  pending: {label:'반영 대기', cls:'pending'},
+  warn:    {label:'확인 필요', cls:'warn'},
+  danger:  {label:'위험',      cls:'danger'},
+  unknown: {label:'미확인',    cls:'unknown'},
 };
-const MODE = { block:'차단', read_only:'읽기 전용', allow:'허용' };
+const MODE = {block:'차단', read_only:'읽기 전용', allow:'허용'};
+const MODE_COLOR = {block:'#168a4f', read_only:'#e0a100', allow:'#c0291b'};
 let timer = null;
 
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || 'GET',
@@ -117,16 +190,9 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
   return data;
 }
-function fmtAge(s) {
-  if (s == null) return '—';
-  if (s < 60) return s + '초 전';
-  if (s < 3600) return Math.floor(s / 60) + '분 전';
-  return Math.floor(s / 3600) + '시간 전';
-}
-function fmtTime(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('ko-KR', {hour12:false});
-}
+const fmtAge = s => s == null ? '—' : s < 60 ? s + '초 전' : s < 3600 ? Math.floor(s/60) + '분 전' : Math.floor(s/3600) + '시간 전';
+const fmtTime = iso => iso ? new Date(iso).toLocaleString('ko-KR', {hour12:false}) : '—';
+const fmtClock = iso => iso ? new Date(iso).toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit', hour12:false}) : '';
 
 function showLogin() {
   clearInterval(timer);
@@ -145,47 +211,124 @@ function showMain() {
 async function load() {
   try {
     const [agents, events] = await Promise.all([api('/api/agents'), api('/api/events?limit=40')]);
-    renderAgents(agents);
+    renderSummary(agents);
+    renderGrid(agents);
     renderEvents(events);
-    $('refreshInfo').textContent = '자동 갱신 10초 · ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
+    $('refreshInfo').textContent = '10초 자동 갱신 · ' + new Date().toLocaleTimeString('ko-KR', {hour12:false});
   } catch (e) { if (e.message !== 'unauthorized') $('refreshInfo').textContent = '갱신 실패: ' + e.message; }
 }
 
-function renderAgents(list) {
+// ───── 요약(배너 + KPI + 분포) ─────
+function renderSummary(list) {
+  const n = list.length;
+  const cnt = s => list.filter(a => a.state === s).length;
+  const ok = cnt('ok'), warn = cnt('warn'), danger = cnt('danger'), pend = cnt('pending'), unk = cnt('unknown');
+  const blocked = list.filter(a => a.expected_mode === 'block' && ['ok','pending'].includes(a.state)).length;
+  const usb = list.reduce((s, a) => s + a.usb_devices.length, 0);
+  const tamper = list.reduce((s, a) => s + (a.tamper_count || 0), 0);
+
+  let cls = 'ok', icon = '✅', title = '모든 PC의 USB 제어가 정상입니다', sub = `${n}대 중 ${ok}대 정상`;
+  if (n === 0) { cls = 'unknown'; icon = '➕'; title = '등록된 PC가 없습니다'; sub = '“+ PC 등록”으로 대상 PC를 추가하세요'; }
+  else if (danger) { cls = 'danger'; icon = '🚨'; title = `위험 ${danger}대 — 즉시 확인이 필요합니다`; sub = '보고 끊김 또는 설정 변조가 감지되었습니다'; }
+  else if (warn) { cls = 'warn'; icon = '⚠️'; title = `확인 필요 ${warn}대`; sub = '정책 불일치 또는 차단 모드에서 USB 저장장치가 연결되어 있습니다'; }
+  else if (pend || unk) { cls = 'unknown'; icon = '⏳'; title = '반영/첫 보고를 기다리는 PC가 있습니다'; sub = `반영 대기 ${pend}대 · 미확인 ${unk}대`; }
+  $('banner').className = 'banner ' + cls;
+  $('banner').innerHTML = `<span class="big">${icon}</span><div><div>${title}</div><div class="sub">${esc(sub)}</div></div>`;
+
+  const k = (label, num, c='') => `<div class="kpi ${c}"><div class="label">${label}</div><div class="num">${num}</div></div>`;
+  $('kpis').innerHTML =
+    k('관리 PC', n) + k('정상', ok, 'ok') + k('확인 필요', warn, warn ? 'warn' : '') +
+    k('위험 / 오프라인', danger, danger ? 'danger' : '') + k('차단 적용 중', blocked, 'ok') +
+    k('연결된 USB 저장장치', usb, usb ? 'warn' : '') ;
+
+  const modes = ['block', 'read_only', 'allow'];
+  const total = n || 1;
+  $('dist').innerHTML = modes.map(m => {
+    const c = list.filter(a => a.expected_mode === m).length;
+    return c ? `<span style="width:${c / total * 100}%;background:${MODE_COLOR[m]}" title="${MODE[m]} ${c}대"></span>` : '';
+  }).join('');
+  $('legend').innerHTML = modes.map(m =>
+    `<span><i style="background:${MODE_COLOR[m]}"></i>${MODE[m]} ${list.filter(a => a.expected_mode === m).length}</span>`).join('')
+    + (tamper ? `<span>변조 감지 누적 ${tamper}회</span>` : '');
+}
+
+// ───── PC 카드 ─────
+function controlText(a) {
+  if (a.state === 'unknown') return {ico:'⏳', t1:'첫 보고 대기 중', t2:'대상 PC에서 enroll 명령을 실행하세요'};
+  const offline = isOffline(a);
+  const suffix = offline ? ' (마지막 확인 기준)' : '';
+  if (a.temp_until) return {ico:'⏱️', t1:'임시 허용 중', t2:`${fmtClock(a.temp_until)}까지 · 이후 ${MODE[a.desired_mode]}으로 자동 복귀`};
+  if (a.expected_mode === 'block') return {ico:'🔒', t1:'USB 저장장치 차단 중' + suffix, t2:'새로 연결하는 USB 메모리는 인식되지 않음'};
+  if (a.expected_mode === 'read_only') return {ico:'📖', t1:'USB 읽기 전용' + suffix, t2:'읽기만 가능, 쓰기·복사 불가'};
+  return {ico:'🔓', t1:'USB 허용 중' + suffix, t2:'제한 없이 사용 가능'};
+}
+
+// 제어 검증 3종: 정책 적용 / 레지스트리 실제값 / USB 저장장치
+const isOffline = a => a.age_sec != null && a.age_sec > 100;
+function verify(a) {
+  if (a.state === 'unknown' || a.effective_mode == null || isOffline(a))
+    return [['정책 적용','na'],['레지스트리','na'],['USB 장치','na']];
+  const exp = a.expected_mode;
+  const expStart = exp === 'block' ? 4 : 3;
+  const expWp = exp === 'read_only' ? 1 : 0;
+  const applied = a.effective_mode === exp;
+  const reg = a.usbstor_start === expStart && (a.write_protect || 0) === expWp;
+  let dev;
+  if (exp === 'block') dev = a.usb_devices.length === 0 ? 'pass' : 'fail';
+  else dev = 'na';
+  return [['정책 적용', applied ? 'pass' : 'fail'], ['레지스트리', reg ? 'pass' : 'fail'], ['USB 장치', dev]];
+}
+const chkLabel = {pass:'✓ 정상', fail:'✗ 불일치', na:'확인 불가'};
+
+function renderGrid(list) {
   $('empty').classList.toggle('hidden', list.length > 0);
-  $('agents').innerHTML = list.map(a => {
-    const [label, cls] = STATE[a.state] || STATE.unknown;
-    const m = a.expected_mode;
-    const modeBtn = (mode, text) =>
-      `<button class="${a.desired_mode === mode && !a.temp_until ? 'mode-on' : ''}" data-act="mode" data-id="${a.id}" data-mode="${mode}">${text}</button>`;
-    const devs = a.usb_devices.length
-      ? a.usb_devices.map(d => `<div>${esc(d.model || d.pnp_id)}</div>`).join('')
-      : '<span class="muted">없음</span>';
-    return `<tr>
-      <td><strong>${esc(a.name)}</strong><div class="muted">${esc(a.hostname || '—')}${a.last_ip ? ' · ' + esc(a.last_ip) : ''}${a.version ? ' · v' + esc(a.version) : ''}</div></td>
-      <td><span class="badge ${cls}">${label}</span>
-          <div class="reasons">${a.reasons.map(esc).join('<br>')}</div>
-          ${a.tamper_count ? `<div class="reasons">변조 감지 누적 ${a.tamper_count}회</div>` : ''}</td>
-      <td>적용: <strong>${esc(MODE[m] || m)}</strong>
-          ${a.temp_until ? `<div class="muted">임시 허용 ~ ${fmtTime(a.temp_until)}</div>` : ''}
-          <div class="muted">PC 보고: ${esc(MODE[a.effective_mode] || a.effective_mode || '—')}</div></td>
-      <td>${devs}</td>
-      <td>${fmtAge(a.age_sec)}</td>
-      <td><div class="actions">
-          ${modeBtn('block', '차단')}${modeBtn('read_only', '읽기 전용')}${modeBtn('allow', '허용')}
-          <button data-act="temp" data-id="${a.id}">30분 허용</button>
-          <button class="danger" data-act="del" data-id="${a.id}" data-name="${esc(a.name)}">삭제</button>
-      </div></td></tr>`;
+  $('grid').innerHTML = list.map(a => {
+    const st = STATE[a.state] || STATE.unknown;
+    const c = controlText(a);
+    const checks = verify(a).map(([n, r]) => {
+      const text = n === 'USB 장치' && r === 'fail' ? `${a.usb_devices.length}개 연결` : (n === 'USB 장치' && r === 'pass' ? '✓ 없음' : chkLabel[r]);
+      return `<div class="chk ${r}">${n}<span class="v">${text}</span></div>`;
+    }).join('');
+    const bad = ['danger','warn'].includes(a.state);
+    const mb = (mode, text) => `<button class="${a.desired_mode === mode && !a.temp_until ? 'on' : ''}" data-act="mode" data-id="${a.id}" data-mode="${mode}">${text}</button>`;
+    const devs = (a.usb_devices.length && a.expected_mode !== 'block' && !isOffline(a))
+      ? `<div class="devs">🔌 연결된 USB 저장장치<br>${a.usb_devices.map(d => esc(d.model || d.pnp_id)).join('<br>')}</div>` : '';
+    return `<div class="pc ${st.cls}">
+      <div class="pc-head">
+        <div><div class="pc-name">${esc(a.name)}</div>
+             <div class="muted">${esc(a.hostname || '—')}${a.last_ip ? ' · ' + esc(a.last_ip) : ''}</div></div>
+        <span class="badge b-${st.cls}">${st.label}</span>
+      </div>
+      <div class="control"><span class="ico">${c.ico}</span><div><div class="t1">${c.t1}</div><div class="muted">${esc(c.t2)}</div></div></div>
+      <div class="checks">${checks}</div>
+      <div class="reasons ${bad ? 'bad' : ''}">${a.reasons.map(esc).join('<br>')}</div>
+      ${devs}
+      <dl>
+        <dt>마지막 보고</dt><dd>${fmtAge(a.age_sec)}</dd>
+        <dt>목표 / PC 보고</dt><dd>${esc(MODE[a.desired_mode])} / ${esc(MODE[a.effective_mode] || '—')}</dd>
+        <dt>USBSTOR / WP</dt><dd>Start=${a.usbstor_start ?? '—'} / WriteProtect=${a.write_protect ?? '—'}</dd>
+        <dt>정책 재적용</dt><dd>${fmtTime(a.last_enforce_utc)}</dd>
+        <dt>변조 감지</dt><dd>${a.tamper_count || 0}회${a.last_tamper_utc ? ' (최근 ' + fmtTime(a.last_tamper_utc) + ')' : ''}</dd>
+        <dt>에이전트</dt><dd>${a.version ? 'v' + esc(a.version) : '—'} · 등록 ${fmtTime(a.created_at)}</dd>
+      </dl>
+      <div class="actions">
+        ${mb('block','차단')}${mb('read_only','읽기 전용')}${mb('allow','허용')}
+        <button data-act="temp" data-id="${a.id}">30분 허용</button>
+        <button class="del" data-act="del" data-id="${a.id}" data-name="${esc(a.name)}">삭제</button>
+      </div>
+    </div>`;
   }).join('');
 }
 
+// ───── 이벤트 ─────
 function renderEvents(list) {
-  const KIND = {state:'상태', mode_changed:'정책 변경', temp_allow:'임시 허용', agent_created:'PC 등록',
-                agent_deleted:'PC 삭제', admin_login:'로그인', admin_login_fail:'로그인 실패'};
-  $('events').innerHTML = list.map(e =>
-    `<tr><td class="muted" style="white-space:nowrap">${fmtTime(e.ts)}</td>
-     <td style="white-space:nowrap">${esc(KIND[e.kind] || e.kind)}</td>
-     <td>${esc(e.agent_name || '')}</td><td class="muted">${esc(e.detail || '')}</td></tr>`).join('');
+  const KIND = {state:'상태 변화', mode_changed:'정책 변경', temp_allow:'임시 허용', agent_created:'PC 등록',
+                agent_deleted:'PC 삭제', admin_login:'관리자 로그인', admin_login_fail:'로그인 실패'};
+  $('events').innerHTML = list.length ? list.map(e =>
+    `<li><div class="muted">${fmtTime(e.ts)}</div>
+         <div><span class="k">${esc(KIND[e.kind] || e.kind)}</span>${e.agent_name ? ' · ' + esc(e.agent_name) : ''}</div>
+         <div class="muted">${esc(e.detail || '')}</div></li>`).join('')
+    : '<li class="muted">이벤트가 없습니다</li>';
 }
 
 // ───── 이벤트 바인딩 ─────
@@ -206,7 +349,7 @@ $('addBtn').onclick = async () => {
     const cmd = `usbguard enroll ${location.origin} ${r.token}`;
     $('tokenBox').classList.remove('hidden');
     $('tokenBox').innerHTML =
-      `<div><strong>${esc(r.name)}</strong> 등록 완료. 아래 토큰은 <strong>지금 한 번만</strong> 표시됩니다.</div>
+      `<div><strong>${esc(r.name)}</strong> 등록 완료. 토큰은 <strong>지금 한 번만</strong> 표시됩니다.</div>
        <div class="muted" style="margin:6px 0">대상 PC에서 관리자 권한 명령 프롬프트로 실행:</div>
        <div><code>${esc(cmd)}</code></div>`;
     $('newName').value = '';
@@ -214,7 +357,7 @@ $('addBtn').onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
-$('agents').addEventListener('click', async ev => {
+$('grid').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-act]');
   if (!b) return;
   const id = b.dataset.id;
